@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+/mod_tfr
+/build
+/dist
+/logs
+*.log
+/.pi
+/.vscode
+/hoi4port.toml
+*.spec
+/hoi4port.egg-info/

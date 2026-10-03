@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.11', '3.13']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install package
+        run: pip install .
+      - name: CLI sanity check
+        run: hoi4port --version
+      # NOTE: the functional test suite is private (not in this repository):
+      # run it locally with `python tests/run_all.py`.
+
+  build:
+    needs: test
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Build wheel + sdist
+        run: |
+          pip install build
+          python -m build
+      - name: Standalone executable (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          pip install .
+          pip install pyinstaller
+          pyinstaller --onefile --name hoi4port `
+            --add-data "pipeline/bin/texconv.exe;pipeline/bin" `
+            --distpath dist_exe hoi4port.py
+      - name: Test executable
+        if: runner.os == 'Windows'
+        run: ./dist_exe/hoi4port.exe --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.os }}
+          path: |
+            dist/*
+            dist_exe/*
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: release
+      - uses: softprops/action-gh-release@v2
+        with:
+          fail_on_unmatched_files: true
+          files: |
+            release/**

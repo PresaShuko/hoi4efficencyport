@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hoi4port"
+dynamic = ["version"]
+description = "Pipeline di porting e ottimizzazione asset per mod HoI4 (DDS, mesh, entity)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "hoi4port contributors" }]
+keywords = ["hoi4", "hearts-of-iron-iv", "modding", "dds", "texconv", "clausewitz"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Games/Entertainment",
+    "Topic :: Multimedia :: Graphics",
+]
+dependencies = ["Pillow>=10"]
+
+[project.scripts]
+hoi4port = "hoi4port:main"
+
+[tool.setuptools]
+py-modules = ["hoi4port"]
+packages = ["pipeline"]
+
+[tool.setuptools.dynamic]
+version = { attr = "pipeline.__version__" }
+
+[tool.setuptools.package-data]
+pipeline = ["bin/*"]

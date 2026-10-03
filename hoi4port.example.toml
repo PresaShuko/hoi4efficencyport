@@ -1,0 +1,13 @@
+# hoi4port configuration example: copy to hoi4port.toml (cwd) or to the user
+# config directory and adapt. Every value is optional: CLI flags and HOI4PORT_*
+# env vars take priority; missing paths are autodetected.
+
+# Workshop mod: numeric Steam ID or direct folder path.
+mod = "3350890356"
+
+# Working directory (default: ./mod_tfr) and output (default: ./build).
+# staging = "mod_tfr"
+# out = "build"
+
+# HoI4 install for baseline/dedup (default: Steam autodetect).
+# vanilla = "C:/Program Files (x86)/Steam/steamapps/common/Hearts of Iron IV"

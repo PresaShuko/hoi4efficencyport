@@ -42,6 +42,13 @@ regole in `classify_token`, emerso correggendo BUG-06).
 > display). Verifica end-to-end: la GUI reale ha eseguito
 > `sync → scan → analyze → convert --apply` su una fixture, producendo i DDS e
 > il manifest, 0 errori.
+>
+> **Aggiornamento 1.4.0 (2026-11-17)**: **262 test**, tutti verdi. Nuovi in
+> `test_gui.py`: copertura dei tooltip (ogni controllo richiesto ha una
+> spiegazione ≥ 40 caratteri, ogni fase ≥ 60 e coerente con scrive/legge),
+> `plan_auto` (workers da thread con floor 2 e cap 16, avviso sotto 5 GB,
+> vanilla assente, RAM/spazio sconosciuti) e smoke di `Auto` sulla finestra
+> reale.
 
 ## Come rieseguire
 

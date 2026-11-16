@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.4.0 - 2026-11-17
+
+Interfaccia: spiegazioni e rilevamento della macchina.
+
+- **Tooltip su ogni controllo** (campi, `Sfoglia`/`Rileva`, ognuna delle 10 fasi,
+  interruttore, workers/cap/cull, i quattro flag, Esegui/Annulla/Apri output/
+  error.log, log, barra fasi, pulsante Auto). Ritardo 420 ms, mai in primo piano,
+  posizione limitata allo schermo; i test verificano che nessun controllo resti
+  senza spiegazione e che i testi non siano generici.
+- **Auto**: rileva thread logici, RAM (GlobalMemoryStatusEx), spazio libero sul
+  volume della staging e install vanilla, poi imposta `workers` e vanilla e
+  scrive nel log il motivo di ogni scelta. `workers = min(16, max(2, thread))`
+  perché texconv satura la GPU; il cap resta `auto (.gui)` di proposito.
+- Riga macchina nel footer (`12 thread · 31.8 GB RAM · C: 28 GB liberi`),
+  aggiornata da Auto e al primo avvio.
+- Al primo avvio (nessun `gui.json`) i workers vengono seminati dal profilo
+  della macchina invece del default del CLI; con un file esistente le scelte
+  dell'utente restano intatte.
+
 ## 1.3.0 - 2026-11-17
 
 GUI Tkinter (`hoi4port gui`, `hoi4port-gui`, `hoi4port-gui.exe` windowed): nessuna

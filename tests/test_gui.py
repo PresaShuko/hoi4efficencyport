@@ -148,6 +148,64 @@ class ParserContractTest(GuiBase):
                 parser.parse_args(self.gui.stage_command(name, o, prefix=["PY"])[1:])
 
 
+class MachineTest(GuiBase):
+    def test_worker_recommendation_is_floored_and_capped(self):
+        for threads, want in ((0, 2), (1, 2), (2, 2), (4, 4), (12, 12),
+                              (16, 16), (32, 16), (128, 16)):
+            self.assertEqual(self.gui.recommend_workers(threads), want, threads)
+
+    def profile(self, **kw):
+        base = dict(threads=12, ram_gb=31.8, free_gb=210.0,
+                    staging_drive="D:", vanilla="V:/game")
+        return self.gui.SystemProfile(**{**base, **kw})
+
+    def test_plan_sets_workers_from_threads_and_keeps_vanilla(self):
+        plan = self.gui.plan_auto(self.profile())
+        self.assertEqual(plan.workers, "12")
+        self.assertEqual(plan.vanilla, "V:/game")
+        self.assertTrue(any("12 thread" in n for n in plan.notes))
+        self.assertTrue(any("210 GB" in n for n in plan.notes))
+
+    def test_plan_warns_about_low_disk_space(self):
+        plan = self.gui.plan_auto(self.profile(free_gb=3.2))
+        self.assertTrue(any("sotto 5 GB" in n for n in plan.notes), plan.notes)
+        ok = self.gui.plan_auto(self.profile())
+        self.assertFalse(any("sotto 5 GB" in n for n in ok.notes), ok.notes)
+
+    def test_plan_reports_missing_vanilla(self):
+        plan = self.gui.plan_auto(self.profile(vanilla=""))
+        self.assertEqual(plan.vanilla, "")
+        self.assertTrue(any("non rilevata" in n for n in plan.notes), plan.notes)
+
+    def test_plan_survives_unknown_ram_and_disk(self):
+        plan = self.gui.plan_auto(self.profile(ram_gb=0.0, free_gb=0.0,
+                                               staging_drive=""))
+        self.assertEqual(plan.workers, "12")
+        self.assertFalse(any("GB RAM" in n for n in plan.notes), plan.notes)
+
+
+class TooltipCoverageTest(GuiBase):
+    """Every control the user can touch must explain itself."""
+
+    REQUIRED = {"mod", "staging", "out", "vanilla", "browse", "detect", "apply",
+                "workers", "cap", "cull", "skip_vanilla", "vanilla_dedup",
+                "no_moves", "continue", "run", "cancel", "open_out", "diag",
+                "copy", "clear", "log", "bar", "auto", "pc"}
+
+    def test_every_control_has_an_explanation(self):
+        missing = self.REQUIRED - set(self.gui.TOOLTIPS)
+        self.assertFalse(missing, f"tooltip mancante per: {sorted(missing)}")
+        for key, text in self.gui.TOOLTIPS.items():
+            self.assertGreaterEqual(len(text), 40, f"tooltip troppo corto: {key}")
+
+    def test_every_stage_has_an_explanation(self):
+        self.assertEqual(set(self.gui.STAGE_HELP), set(self.gui.STAGE_NAMES))
+        for name, text in self.gui.STAGE_HELP.items():
+            self.assertGreaterEqual(len(text), 60, f"spiegazione corta: {name}")
+            if name in self.gui.WRITE:
+                self.assertNotIn("Solo lettura", text, name)
+
+
 class ClassifyTest(GuiBase):
     def test_zero_counts_are_not_problems(self):
         for line in ("Fine: 0.3 s \u2014 0 errori, 0 avvisi.",
@@ -223,6 +281,23 @@ class SettingsTest(GuiBase):
 
 
 class AppSmokeTest(GuiBase):
+    @unittest.skipUnless(_tk_available(), "no display for Tk")
+    def test_auto_applies_the_machine_profile(self):
+        import tkinter as tk
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            app = self.gui.App(root, self.gui.Settings(staging="s", out="o"))
+            app.v_van.set("")
+            app.auto()
+            self.assertTrue(app.pc_txt.cget("text"))
+            self.assertIn("thread", app.pc_txt.cget("text"))
+            self.assertEqual(app.v_workers.get(),
+                             str(self.gui.recommend_workers(self.gui.os.cpu_count() or 0)))
+        finally:
+            root.destroy()
+
     @unittest.skipUnless(_tk_available(), "no display for Tk")
     def test_builds_the_window_with_ten_stages(self):
         import tkinter as tk

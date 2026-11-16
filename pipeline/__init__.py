@@ -1,3 +1,3 @@
 """Pipeline di porting/ottimizzazione mod HoI4: scan → normalize → convert → cutover."""
 
-__version__ = "1.3.0"
+__version__ = "1.4.0"

@@ -13,6 +13,7 @@ import json
 import os
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -160,6 +161,111 @@ def clamp_int(raw: str, default: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, value))
 
 
+
+# --- machine detection (pure decision, thin syscall layer) -------------------
+@dataclass(frozen=True)
+class SystemProfile:
+    """What the GUI knows about this PC. No I/O happens after construction."""
+
+    threads: int = 0
+    ram_gb: float = 0.0
+    free_gb: float = 0.0
+    staging_drive: str = ""
+    vanilla: str = ""
+
+
+@dataclass(frozen=True)
+class AutoPlan:
+    workers: str
+    vanilla: str
+    notes: tuple[str, ...]
+
+
+def recommend_workers(threads: int) -> int:
+    """Parallel texconv jobs: one per logical CPU, floored at 2, capped at 16.
+
+    texconv saturates the GPU, so past the core count the extra processes only
+    add memory pressure and scheduling noise; below 2 a GB-sized mod crawls.
+    """
+    return max(2, min(16, int(threads or 0)))
+
+
+def plan_auto(profile: SystemProfile) -> AutoPlan:
+    """Settings this machine should use, plus one human sentence per decision."""
+    notes: list[str] = []
+    workers = recommend_workers(profile.threads)
+    notes.append(f"CPU: {profile.threads} thread logici → texconv workers {workers}")
+    if profile.ram_gb:
+        notes.append(f"RAM: {profile.ram_gb:.1f} GB")
+    if profile.free_gb and profile.staging_drive:
+        notes.append(f"Spazio libero su {profile.staging_drive}: "
+                     f"{profile.free_gb:.0f} GB (la staging è una copia integrale)")
+        if profile.free_gb < 5:
+            notes.append("Spazio sotto 5 GB: la copia della mod potrebbe non entrare.")
+    notes.append(f"Vanilla: {profile.vanilla}" if profile.vanilla else
+                 "Vanilla: non rilevata, imposta il percorso a mano")
+    return AutoPlan(workers=str(workers), vanilla=profile.vanilla,
+                    notes=tuple(notes))
+
+
+def _ram_gb() -> float:
+    if os.name != "nt":
+        try:
+            return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / 2**30
+        except (ValueError, OSError):
+            return 0.0
+    try:
+        import ctypes
+
+        class MemStatus(ctypes.Structure):
+            _fields_ = [("dwLength", ctypes.c_uint32),
+                        ("dwMemoryLoad", ctypes.c_uint32),
+                        ("ullTotalPhys", ctypes.c_uint64),
+                        ("ullAvailPhys", ctypes.c_uint64),
+                        ("ullTotalPageFile", ctypes.c_uint64),
+                        ("ullAvailPageFile", ctypes.c_uint64),
+                        ("ullTotalVirtual", ctypes.c_uint64),
+                        ("ullAvailVirtual", ctypes.c_uint64),
+                        ("ullAvailExtendedVirtual", ctypes.c_uint64)]
+
+        status = MemStatus()
+        status.dwLength = ctypes.sizeof(MemStatus)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return status.ullTotalPhys / 2**30
+    except Exception:  # noqa: BLE001 - detection is best effort
+        pass
+    return 0.0
+
+
+def _free_gb(path: Path) -> tuple[float, str]:
+    probe = path.expanduser().resolve()
+    while not probe.exists() and probe.parent != probe:
+        probe = probe.parent
+    try:
+        usage = shutil.disk_usage(probe)
+    except OSError:
+        return 0.0, ""
+    drive = (Path(probe).anchor or str(probe)).rstrip("\\/") or str(probe)
+    return usage.free / 2**30, drive
+
+
+def system_profile(staging: str, vanilla: str = "") -> SystemProfile:
+    """Read CPU/RAM/disk once; the vanilla install is autodetected if unknown."""
+    resolved_vanilla = vanilla.strip()
+    if not resolved_vanilla:
+        try:
+            from pipeline.config import resolve_vanilla
+
+            found = resolve_vanilla(None)
+            resolved_vanilla = str(found) if found else ""
+        except Exception:  # noqa: BLE001 - config is optional here
+            resolved_vanilla = ""
+    free, drive = _free_gb(Path(staging or ".").expanduser())
+    return SystemProfile(threads=os.cpu_count() or 0, ram_gb=_ram_gb(),
+                         free_gb=free, staging_drive=drive,
+                         vanilla=resolved_vanilla)
+
+
 # --- persisted settings -----------------------------------------------------
 @dataclass
 class Settings:
@@ -217,6 +323,156 @@ class Settings:
             target.write_text(json.dumps(asdict(self), indent=1), encoding="utf-8")
         except OSError:
             pass
+
+
+
+# --- explanations (tooltips) -------------------------------------------------
+STAGE_HELP = {
+    "sync": "Copia speculare della mod in Staging (robocopy /MIR). "
+            "La cartella originale viene solo letta. Cancella dalla staging "
+            "ciò che non è più nella mod.",
+    "scan": "Legge la staging e riporta riferimenti agli asset, GFX_* usati ma "
+            "non definiti, sprite definiti e mai usati, hash della vanilla per "
+            "il dedup. Non scrive file della mod.",
+    "normalize": "Rimette gli asset nell'ordine delle cartelle vanilla e ripara "
+                 "i riferimenti rotti. Con Applica modifiche spento mostra solo "
+                 "il piano.",
+    "analyze": "Costruisce il piano asset: classe (ui, portraits, loading…), "
+               "alpha, dimensione massima dalle .gui, duplicati, file inutilizzati. "
+               "convert e cutover leggono questo piano.",
+    "convert": "Converte PNG/TGA/altri formati in DDS DXT1/DXT5, applica il cap "
+               "di risoluzione e il padding multiplo di 4. Lascia i file "
+               "originali al loro posto: li rimuove cutover.",
+    "cutover": "Riscrive i riferimenti da .png/.tga a .dds, elimina i duplicati "
+               "interni e cancella gli originali rimasti. È la fase che rende "
+               "effettiva la conversione: senza, il gioco non carica i nuovi DDS.",
+    "meshscan": "Analizza i .mesh: vertici, triangoli, materiali, collisione, "
+                "confronto con la baseline vanilla. Solo lettura.",
+    "texfix": "Porta le texture dei modelli a mip chain completa e DXT1/DXT5, "
+              "che il gioco richiede per i modelli 3D. Rilegge mesh_stats.json.",
+    "entityfix": "Aggiunge cull_radius agli ambient object che non ce l'hanno "
+                 "(default 100) e segnala gli attach rotti. Senza --apply fa "
+                 "solo l'audit.",
+    "validate": "Controlla i DDS prodotti (header, fourcc, mip), i riferimenti "
+                "dopo il cutover, gli orfani, le dimensioni su disco e le mesh. "
+                "Esce con codice ≠ 0 se trova problemi.",
+}
+
+TOOLTIPS = {
+    "mod": "Cartella della mod da ottimizzare oppure ID Workshop numerico "
+           "(es. 3350890356). Viene solo letta: sync ne crea una copia in Staging.",
+    "staging": "Copia di lavoro: qui avvengono move, riscritture e conversione, "
+               "quindi la mod originale resta intatta. Default mod_tfr accanto "
+               "all'eseguibile; serve spazio pari alla mod.",
+    "out": "Report e manifest JSON letti dalle fasi successive (piano asset, "
+           "conversioni, verifiche). Non fa parte della mod e si può cancellare.",
+    "vanilla": "Install di Hearts of Iron IV: serve per baseline degli hash, "
+               "dedup e fallback degli sprite. Autodetect dalle librerie Steam.",
+    "browse": "Scegli una cartella dal disco (la scelta non viene applicata "
+              "finché non premi Esegui).",
+    "detect": "Cerca automaticamente la mod nelle Workshop installate o la "
+              "vanilla nelle librerie Steam.",
+    "apply": "Acceso: le fasi che scrivono modificano davvero la staging, dopo "
+             "una conferma che mostra la cartella. Spento: dry-run, nessun file "
+             "toccato (è il default).",
+    "workers": "Quante conversioni texconv in parallelo. Ogni processo usa la "
+               "GPU: oltre il numero di core il guadagno è minimo e cresce la "
+               "memoria occupata. Valori 1–32.",
+    "cap": "Lato massimo in pixel (potenza di 2). Vuoto = cap dedotto dalle "
+           "dimensioni dichiarate nei .gui, che è la scelta giusta quasi sempre.",
+    "cull": "Valore di cull_radius inserito negli ambient object privi di uno "
+            "(entityfix). Default 100.",
+    "skip_vanilla": "Non calcola l'hash dell'install vanilla. Più veloce, ma "
+                    "senza baseline non c'è dedup contro i file vanilla.",
+    "vanilla_dedup": "Aggiunge al cutover la cancellazione dei file identici alla "
+                     "vanilla. Spento di default: il fallback per-file non è "
+                     "affidabile quando il file ha flag o bookmark.",
+    "no_moves": "normalize riscrive solo i riferimenti, senza riordinare le "
+                "cartelle degli asset.",
+    "continue": "Non ferma la pipeline al primo errore. Utile per un report "
+                "completo, rischioso perché le fasi successive lavorano su uno "
+                "stato parziale.",
+    "run": "Esegue le fasi selezionate nell'ordine 1→10 (Ctrl+Invio).",
+    "cancel": "Termina il processo in corso e i suoi figli (Esc). La staging può "
+              "restare a metà: rilancia le fasi da capo.",
+    "open_out": "Apre in Explorer la cartella dei report: piano asset, "
+                "manifest di conversione e report di validazione.",
+    "diag": "Analizza l'error.log del gioco: texture e sprite che il gioco non "
+            "riesce a caricare, con il file che li dichiara.",
+    "copy": "Copia tutto il log negli appunti, comodo per allegarlo a una "
+            "segnalazione.",
+    "clear": "Svuota il log (Ctrl+L). Non tocca i report su disco.",
+    "log": "Output delle fasi, colorato per severità: un riepilogo con "
+           "«0 errori» non è un errore.",
+    "bar": "Una tacca per fase selezionata: verde = completata, ambra = in corso.",
+    "auto": "Rileva CPU, RAM, spazio libero e install del gioco, poi imposta "
+            "workers e vanilla per questa macchina. Non cambia il cap e non "
+            "attiva Applica modifiche.",
+    "pc": "Rilevato su questo PC. Aggiornato da «Auto»; nessun valore viene "
+          "inviato altrove.",
+}
+
+
+class Tooltip:
+    """Delayed hover bubble. Never takes focus, always on top, screen-clamped."""
+
+    DELAY = 420
+
+    def __init__(self, widget: tk.Misc, text: str, wrap: int = 360):
+        self.widget, self.text, self.wrap = widget, text, wrap
+        self._after: str | None = None
+        self.tip: tk.Toplevel | None = None
+        widget.bind("<Enter>", self._enter, add="+")
+        widget.bind("<Leave>", self._leave, add="+")
+        widget.bind("<ButtonPress>", self._leave, add="+")
+        widget.bind("<Destroy>", self._leave, add="+")
+
+    def _enter(self, _e=None):
+        self._cancel()
+        self._after = self.widget.after(self.DELAY, self.show)
+
+    def _leave(self, _e=None):
+        self._cancel()
+        self.hide()
+
+    def _cancel(self):
+        if self._after is not None:
+            try:
+                self.widget.after_cancel(self._after)
+            except tk.TclError:
+                pass
+            self._after = None
+
+    def show(self):
+        if self.tip is not None or not self.widget.winfo_exists():
+            return
+        tip = tk.Toplevel(self.widget)
+        tip.wm_overrideredirect(True)
+        tip.attributes("-topmost", True)
+        frame = tk.Frame(tip, bg=C["border_hi"], padx=1, pady=1)
+        frame.pack()
+        tk.Label(frame, text=self.text, bg="#1E293B", fg=C["fg"], font=UI_SM,
+                 justify="left", wraplength=self.wrap, padx=9, pady=7).pack()
+        tip.update_idletasks()
+        x = self.widget.winfo_rootx() + 10
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 8
+        w, h = tip.winfo_width(), tip.winfo_height()
+        x = max(4, min(x, tip.winfo_screenwidth() - w - 8))
+        y = max(4, min(y, tip.winfo_screenheight() - h - 8))
+        tip.wm_geometry(f"+{x}+{y}")
+        self.tip = tip
+
+    def hide(self):
+        if self.tip is not None:
+            self.tip.destroy()
+            self.tip = None
+
+
+def tip_tree(widget: tk.Misc, text: str) -> None:
+    """Attach one explanation to a widget and everything inside it."""
+    Tooltip(widget, text)
+    for child in widget.winfo_children():
+        tip_tree(child, text)
 
 
 # --- widgets ----------------------------------------------------------------
@@ -392,6 +648,7 @@ class App:
         self.errors = self.warns = 0
         self.t0 = 0.0
         self.finished = True
+        self._fresh = settings is None and not Settings.path().exists()
         self.settings = settings or Settings.load()
 
         root.title(f"hoi4port {__version__}")
@@ -441,6 +698,7 @@ class App:
         self.log("Pronto. Scegli la mod e premi Esegui (Ctrl+Invio).", "muted")
         self.log("Applica modifiche è spento: le fasi che scrivono restano dry-run.",
                  "muted")
+        self.root.after(120, self._boot_detect)
 
     @staticmethod
     def _pick_fonts():
@@ -480,41 +738,54 @@ class App:
         b = c.body
         self.hints: dict[str, tk.Label] = {}
         rows = (
-            ("Mod", self.v_mod, True, "ID Workshop o cartella"),
-            ("Staging", self.v_stg, False, "cartella di lavoro"),
-            ("Output", self.v_out, False, "report e manifest"),
-            ("Vanilla", self.v_van, True, "opzionale: baseline e dedup"),
+            ("Mod", self.v_mod, True, "ID Workshop o cartella", "mod"),
+            ("Staging", self.v_stg, False, "cartella di lavoro", "staging"),
+            ("Output", self.v_out, False, "report e manifest", "out"),
+            ("Vanilla", self.v_van, True, "opzionale: baseline e dedup", "vanilla"),
         )
-        for i, (label, var, detect, hint) in enumerate(rows):
-            tk.Label(b, text=label, bg=C["card"], fg=C["muted"], font=UI,
-                     width=8, anchor="w").grid(row=i, column=0, sticky="w", pady=3)
-            entry(b, var).grid(row=i, column=1, sticky="ew", pady=3, ipady=4)
+        for i, (label, var, detect, hint, key) in enumerate(rows):
+            lab = tk.Label(b, text=label, bg=C["card"], fg=C["muted"], font=UI,
+                           width=8, anchor="w")
+            lab.grid(row=i, column=0, sticky="w", pady=3)
+            Tooltip(lab, TOOLTIPS[key])
+            e = entry(b, var)
+            e.grid(row=i, column=1, sticky="ew", pady=3, ipady=4)
+            Tooltip(e, TOOLTIPS[key])
             bf = tk.Frame(b, bg=C["card"])
             bf.grid(row=i, column=2, sticky="e", padx=(8, 0), pady=3)
-            button(bf, "Sfoglia", "quiet",
-                   lambda v=var: self._browse(v)).pack(side="left")
+            browse = button(bf, "Sfoglia", "quiet", lambda v=var: self._browse(v))
+            browse.pack(side="left")
+            Tooltip(browse, TOOLTIPS["browse"])
             if detect:
-                button(bf, "Rileva", "quiet",
-                       lambda v=var: self._detect(v)).pack(side="left", padx=(6, 0))
+                find = button(bf, "Rileva", "quiet",
+                              lambda v=var: self._detect(v))
+                find.pack(side="left", padx=(6, 0))
+                Tooltip(find, TOOLTIPS["detect"])
             lb = tk.Label(b, text=hint, bg=C["card"], fg=C["dim"], font=UI_SM,
                           anchor="w")
             lb.grid(row=i, column=3, sticky="w", padx=(10, 0))
+            Tooltip(lb, TOOLTIPS[key])
             self.hints[label] = lb
         b.columnconfigure(1, weight=1)
         self.v_stg.trace_add("write", lambda *_a: self._hints())
         self.v_out.trace_add("write", lambda *_a: self._hints())
-        tk.Label(b, text="Priorità: campi → hoi4port.toml → autodetect Steam.",
-                 bg=C["card"], fg=C["dim"], font=UI_SM).grid(
-            row=len(rows), column=0, columnspan=4, sticky="w", pady=(7, 0))
+        prio = tk.Label(b, text="Priorità: campi → hoi4port.toml → autodetect Steam.",
+                        bg=C["card"], fg=C["dim"], font=UI_SM)
+        prio.grid(row=len(rows), column=0, columnspan=4, sticky="w", pady=(7, 0))
+        Tooltip(prio, "Ogni percorso si risolve in quest'ordine: valore scritto "
+                      "qui, variabile HOI4PORT_* , hoi4port.toml, poi Steam.")
 
     def _build_pipeline(self, parent):
         c = Card(parent, "Pipeline")
         c.grid(row=0, column=0, sticky="nsew")
         b = c.body
-        tk.Label(b, text="Ordine di esecuzione 1 → 10. Le fasi che scrivono "
-                         "seguono l'interruttore «Applica modifiche».",
-                 bg=C["card"], fg=C["dim"], font=UI_SM).grid(
-            row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        note = tk.Label(b, text="Ordine di esecuzione 1 → 10. Le fasi che scrivono "
+                                "seguono l'interruttore «Applica modifiche».",
+                        bg=C["card"], fg=C["dim"], font=UI_SM)
+        note.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        Tooltip(note, "L'ordine conta: convert produce i DDS, cutover riscrive i "
+                      "riferimenti e cancella gli originali, validate controlla "
+                      "il risultato. Passa il mouse su una fase per i dettagli.")
         for i, (name, label, desc, mode) in enumerate(STAGES):
             col, row = divmod(i, 5)
             cell = tk.Frame(b, bg=C["card"])
@@ -533,49 +804,72 @@ class App:
             tk.Label(cell, text=desc, bg=C["card"], fg=C["dim"], font=UI_SM,
                      anchor="w").grid(row=1, column=1, columnspan=3, sticky="w",
                                       padx=(7, 0))
-            tk.Label(cell, text="● scrive" if mode == "write" else "○ legge",
-                     bg=C["card"], fg=C["warn"] if mode == "write" else C["faint"],
-                     font=("Segoe UI", 8), anchor="e").grid(row=1, column=4,
-                                                            sticky="e")
+            tag = tk.Label(cell, text="● scrive" if mode == "write" else "○ legge",
+                           bg=C["card"], fg=C["warn"] if mode == "write" else C["faint"],
+                           font=("Segoe UI", 8), anchor="e")
+            tag.grid(row=1, column=4, sticky="e")
+            help_text = STAGE_HELP[name]
+            if mode == "write":
+                help_text += "\n\nScrive nella staging: serve Applica modifiche."
+            tip_tree(cell, help_text)
             self.rows[name] = {"status": status, "state": "pending"}
 
     def _build_options(self, parent):
         c = Card(parent, "Opzioni")
         c.grid(row=0, column=1, sticky="nsew", padx=(12, 0))
+        auto = button(c.head, "Auto", "quiet", self.auto)
+        auto.pack(side="right")
+        Tooltip(auto, TOOLTIPS["auto"])
         b = c.body
-        tk.Label(b, text="Sicurezza", bg=C["card"], fg=C["muted"],
-                 font=("Segoe UI Semibold", 8)).pack(anchor="w")
-        Switch(b, "Applica modifiche", self.v_apply).pack(anchor="w", pady=(5, 0))
-        tk.Label(b, text="Spento = dry-run: nessun file viene toccato.",
-                 bg=C["card"], fg=C["dim"], font=UI_SM).pack(anchor="w", pady=(2, 7))
+        sec = tk.Label(b, text="Sicurezza", bg=C["card"], fg=C["muted"],
+                       font=("Segoe UI Semibold", 8))
+        sec.pack(anchor="w")
+        Tooltip(sec, "Le fasi che scrivono partono spente: prima si guarda il "
+                     "piano, poi si applica.")
+        sw = Switch(b, "Applica modifiche", self.v_apply)
+        sw.pack(anchor="w", pady=(5, 0))
+        tip_tree(sw, TOOLTIPS["apply"])
+        hint = tk.Label(b, text="Spento = dry-run: nessun file viene toccato.",
+                        bg=C["card"], fg=C["dim"], font=UI_SM)
+        hint.pack(anchor="w", pady=(2, 7))
+        Tooltip(hint, TOOLTIPS["apply"])
 
         grid = tk.Frame(b, bg=C["card"])
         grid.pack(fill="x")
-        for r, (lab, var, hint) in enumerate((
-                ("texconv", self.v_workers, "processi 1–32"),
-                ("cap", self.v_cap, "vuoto = auto (.gui)"),
-                ("cull", self.v_cull, "entityfix radius"))):
-            tk.Label(grid, text=lab, bg=C["card"], fg=C["muted"], font=UI
-                     ).grid(row=r, column=0, sticky="w", pady=1)
-            entry(grid, var, width=4).grid(row=r, column=1, sticky="w",
-                                           padx=(8, 6), ipady=3)
-            tk.Label(grid, text=hint, bg=C["card"], fg=C["dim"], font=UI_SM
-                     ).grid(row=r, column=2, sticky="w")
+        for r, (lab, var, text, key) in enumerate((
+                ("texconv", self.v_workers, "processi 1–32", "workers"),
+                ("cap", self.v_cap, "vuoto = auto (.gui)", "cap"),
+                ("cull", self.v_cull, "entityfix radius", "cull"))):
+            lbl = tk.Label(grid, text=lab, bg=C["card"], fg=C["muted"], font=UI)
+            lbl.grid(row=r, column=0, sticky="w", pady=1)
+            Tooltip(lbl, TOOLTIPS[key])
+            e = entry(grid, var, width=4)
+            e.grid(row=r, column=1, sticky="w", padx=(8, 6), ipady=3)
+            Tooltip(e, TOOLTIPS[key])
+            h = tk.Label(grid, text=text, bg=C["card"], fg=C["dim"], font=UI_SM)
+            h.grid(row=r, column=2, sticky="w")
+            Tooltip(h, TOOLTIPS[key])
 
         tk.Frame(b, bg=C["border"], height=1).pack(fill="x", pady=7)
-        for text, var in (("Salta baseline vanilla", self.v_skipvan),
-                          ("Dedup identici a vanilla", self.v_vdedup),
-                          ("Solo ref, nessun move", self.v_nomoves),
-                          ("Continua dopo un errore", self.v_cont)):
-            Check(b, text, var).pack(anchor="w", pady=1)
+        for text, var, key in (("Salta baseline vanilla", self.v_skipvan, "skip_vanilla"),
+                               ("Dedup identici a vanilla", self.v_vdedup, "vanilla_dedup"),
+                               ("Solo ref, nessun move", self.v_nomoves, "no_moves"),
+                               ("Continua dopo un errore", self.v_cont, "continue")):
+            chk = Check(b, text, var)
+            chk.pack(anchor="w", pady=1)
+            tip_tree(chk, TOOLTIPS[key])
 
     def _build_log(self, parent):
         c = Card(parent, "Log")
         c.grid(row=2, column=0, sticky="ew", pady=(12, 0))
         tools = tk.Frame(c.head, bg=C["card"])
         tools.pack(side="right")
-        button(tools, "Svuota", "quiet", self.clear_log).pack(side="right")
-        button(tools, "Copia", "quiet", self.copy_log).pack(side="right", padx=(0, 6))
+        clear = button(tools, "Svuota", "quiet", self.clear_log)
+        clear.pack(side="right")
+        Tooltip(clear, TOOLTIPS["clear"])
+        copy = button(tools, "Copia", "quiet", self.copy_log)
+        copy.pack(side="right", padx=(0, 6))
+        Tooltip(copy, TOOLTIPS["copy"])
         lines = 9
         lh = tkfont.Font(font=MONO).metrics("linespace")
         wrap = tk.Frame(c.body, bg=C["field"], height=lh * lines + 18,
@@ -593,6 +887,7 @@ class App:
                          ("warn", C["warn"]), ("err", C["err"]),
                          ("muted", C["muted"]), ("info", C["fg"])):
             self.txt.tag_configure(tag, foreground=col)
+        Tooltip(self.txt, TOOLTIPS["log"])
 
     def _build_footer(self, root):
         f = tk.Frame(root, bg=C["header"], height=58)
@@ -605,16 +900,25 @@ class App:
         self.phase.pack(anchor="w", pady=(0, 4))
         self.bar = StageBar(left, len(STAGES))
         self.bar.pack(anchor="w")
+        tip_tree(left, TOOLTIPS["bar"])
+        self.pc_txt = tk.Label(f, text="", bg=C["header"], fg=C["faint"],
+                               font=UI_SM, anchor="w")
+        self.pc_txt.pack(side="left", padx=(28, 0))
+        Tooltip(self.pc_txt, TOOLTIPS["pc"])
 
         self.btn_run = button(f, "▶  Esegui", "primary", self.run)
         self.btn_run.pack(side="right", padx=(0, 16), pady=14)
+        Tooltip(self.btn_run, TOOLTIPS["run"])
         self.btn_cancel = button(f, "Annulla", "danger", self.cancel)
         self.btn_cancel.pack(side="right", padx=(0, 10), pady=14)
         self.btn_cancel.configure(state="disabled")
+        Tooltip(self.btn_cancel, TOOLTIPS["cancel"])
         self.btn_diag = button(f, "error.log", "quiet", self.diagnostics)
         self.btn_diag.pack(side="right", padx=(0, 10), pady=14)
-        button(f, "Apri output", "quiet", self.open_out).pack(
-            side="right", padx=(0, 10), pady=14)
+        Tooltip(self.btn_diag, TOOLTIPS["diag"])
+        open_out = button(f, "Apri output", "quiet", self.open_out)
+        open_out.pack(side="right", padx=(0, 10), pady=14)
+        Tooltip(open_out, TOOLTIPS["open_out"])
 
     # -- settings ------------------------------------------------------------
     def opts(self) -> Opts:
@@ -695,6 +999,43 @@ class App:
                 lb.configure(text=short_path(Path(raw).resolve()) + "\\")
             except OSError:
                 lb.configure(text=raw)
+
+    def _pc(self, profile: "SystemProfile") -> None:
+        bits = [f"{profile.threads} thread", f"{profile.ram_gb:.1f} GB RAM"]
+        if profile.free_gb and profile.staging_drive:
+            bits.append(f"{profile.staging_drive} {profile.free_gb:.0f} GB liberi")
+        self.pc_txt.configure(text=" · ".join(bits))
+
+    def _boot_detect(self) -> None:
+        """First run: seed the machine-dependent options instead of the CLI's."""
+        profile = system_profile(self.v_stg.get(), self.v_van.get())
+        plan = plan_auto(profile)
+        if self._fresh:
+            self.v_workers.set(plan.workers)
+        if plan.vanilla and not self.v_van.get().strip():
+            self.v_van.set(plan.vanilla)
+        self._chip()
+        self._pc(profile)
+        if self._fresh:
+            self.log(f"PC: {self.pc_txt.cget('text')}", "muted")
+            self.log(f"Auto: workers {plan.workers} per {profile.threads} thread "
+                     f"logici (modificabile, o premi Auto per riapplicare).",
+                     "muted")
+
+    def auto(self) -> None:
+        """Detect this machine and apply the options that depend on it."""
+        profile = system_profile(self.v_stg.get(), self.v_van.get())
+        plan = plan_auto(profile)
+        self.v_workers.set(plan.workers)
+        if plan.vanilla:
+            self.v_van.set(plan.vanilla)
+        self._chip()
+        self._pc(profile)
+        for note in plan.notes:
+            self.log(f"Auto: {note}", "muted")
+        self.log(f"Auto: impostati workers {plan.workers}"
+                 + (", vanilla rilevata" if plan.vanilla else
+                    ", vanilla non trovata"), "ok")
 
     def _chip(self):
         van = self.v_van.get().strip()

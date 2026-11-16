@@ -38,8 +38,12 @@ paths with `Sfoglia`/`Rileva`, the ten stages with per-stage status, the global
 
 ![hoi4port GUI](docs/gui.png)
 
+- Every control explains itself on hover: fields, stages, options, buttons.
 - The switch is **off** by default: stages that write stay dry-run, and turning
   it on asks for confirmation, showing the directory that will be modified.
+- `Auto` reads this PC (logical CPUs, RAM, free space on the staging volume,
+  the HoI4 install) and sets the options that depend on it, logging why; the
+  footer keeps showing the detected profile.
 - `Ctrl+Invio` runs the selected stages, `Esc` cancels the running process
   tree, `Ctrl+L` clears the log, `error.log` runs `check-log` on the game log.
 - Staging/output shown as `…\tail\` are resolved, so a relative `mod_tfr`

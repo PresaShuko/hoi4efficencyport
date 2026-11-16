@@ -7,7 +7,7 @@ import unittest
 from PIL import Image
 
 from _harness import CMD, TEXCONV, BaseTest
-from pipeline import analyze, convert, dds, images, scanner
+from pipeline import analyze, convert, dds, images, scanner, tools
 
 
 class PadTest(unittest.TestCase):
@@ -157,7 +157,8 @@ class RunTest(BaseTest):
             json.dumps({"files": [{"path": "gfx/interface/gone.png",
                                    "action": "convert", "alpha": "opaque",
                                    "cap": 8, "bytes": 0}]}), encoding="utf-8")
-        if not TEXCONV:
+        if tools.texconv_path() is None:
+            # no texconv at all: run() must refuse before touching the tree
             with self.assertRaises(SystemExit):
                 convert.run(self.ws.modsrc, self.ws.build, apply=True)
             return

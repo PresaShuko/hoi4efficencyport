@@ -35,10 +35,12 @@ class Workspace:
     """Temp tree: modsrc/ (a fake workshop mod), staging/, build/."""
 
     def __init__(self, root: Path):
-        self.root = root
-        self.modsrc = root / "modsrc"
-        self.staging = root / "staging"
-        self.build = root / "build"
+        # resolve(): Windows temp dirs come back in 8.3 form (RUNNER~1) while
+        # config resolves to the long path; compare canonical paths only.
+        self.root = Path(root).resolve()
+        self.modsrc = self.root / "modsrc"
+        self.staging = self.root / "staging"
+        self.build = self.root / "build"
         self.modsrc.mkdir(parents=True, exist_ok=True)
 
     # -- tree helpers ------------------------------------------------------

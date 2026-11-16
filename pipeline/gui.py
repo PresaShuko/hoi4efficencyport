@@ -815,9 +815,13 @@ class App:
         self.phase.configure(text=f"Fase 1 di {len(cmds)} — avvio")
         for name in STAGE_NAMES:
             self.set_stage(name, "pending")
-        threading.Thread(target=self._worker, args=(cmds,), daemon=True).start()
+        # Tk variables must only be read on the main thread: snapshot the one
+        # option the worker needs before handing it the queue.
+        keep_going = bool(self.v_cont.get())
+        threading.Thread(target=self._worker, args=(cmds, keep_going),
+                         daemon=True).start()
 
-    def _worker(self, cmds):
+    def _worker(self, cmds, keep_going: bool):
         total = len(cmds)
         for i, (name, cmd) in enumerate(cmds):
             self.q.put(("stage", (name, "running", i, total)))
@@ -845,7 +849,7 @@ class App:
             self.q.put(("log", (f"  {'✓' if rc == 0 else '✗'} {name:<10}{secs:6.2f} s"
                                 + ("" if rc == 0 else f"   (exit {rc})"),
                                 "ok" if rc == 0 else "err")))
-            if rc != 0 and not self.v_cont.get():
+            if rc != 0 and not keep_going:
                 break
         self.q.put(("done", None))
 

@@ -14,7 +14,8 @@ pip install hoi4port-<version>-py3-none-any.whl
 ```
 
 or, without Python, download `hoi4port.exe` (Windows) from the repository
-*Releases* page.
+*Releases* page. `hoi4port-gui.exe` is the windowed front-end of the same
+build: double-click it, no console and no Python needed.
 
 Windows is the fully supported platform: the texture stages use
 `texconv.exe` (DirectXTex, bundled with the package). On Linux/macOS all
@@ -28,6 +29,23 @@ Wine (invoked automatically, disable with `--no-wine`).
   otherwise pass `--mod <ID>`.
 - HoI4 install (for vanilla baseline/dedup) — autodetected; without it,
   commands degrade gracefully (no baseline).
+
+## GUI
+
+`hoi4port gui` (or `hoi4port-gui.exe`) opens a window over the same pipeline:
+paths with `Sfoglia`/`Rileva`, the ten stages with per-stage status, the global
+`Applica modifiche` switch, the options, and a live log.
+
+![hoi4port GUI](docs/gui.png)
+
+- The switch is **off** by default: stages that write stay dry-run, and turning
+  it on asks for confirmation, showing the directory that will be modified.
+- `Ctrl+Invio` runs the selected stages, `Esc` cancels the running process
+  tree, `Ctrl+L` clears the log, `error.log` runs `check-log` on the game log.
+- Staging/output shown as `…\tail\` are resolved, so a relative `mod_tfr`
+  is never a mystery.
+- The last used paths, options and window size are stored in
+  `<cache>/gui.json` (`%LOCALAPPDATA%\hoi4port` on Windows).
 
 ## Quickstart
 
@@ -81,6 +99,7 @@ mod = "3350890356"
 | `entityfix` | Entity audit + `cull_radius` for ambient objects | `--apply` |
 | `validate` | Post-cutover validation: DDS, scan, disk sizes | no |
 | `check-log` | Texture/sprite errors from the game `error.log` | no |
+| `gui` | Window over the pipeline (same stages, same flags) | as the stages |
 
 Every stage writes JSON manifests/reports into `build/`; a second run is a
 no-op (idempotent).

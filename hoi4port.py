@@ -13,6 +13,7 @@ Commands:
   meshscan   .mesh analysis: vertices, materials, collision, vanilla baseline.
   texfix     Model textures: full mip chain + DXT1/DXT5.
   entityfix  Entity audit + cull_radius for ambient objects.
+  gui        Graphical front-end (Tkinter): run the pipeline, watch the log.
 
 Configuration: CLI flags → env HOI4PORT_MOD/STAGING/VANILLA/OUT →
 hoi4port.toml → Steam library autodetect. `--mod` accepts a numeric
@@ -231,18 +232,22 @@ def add_texconv(p) -> None:
                    help="do not invoke texconv through wine (Linux/macOS)")
 
 
-def main() -> int:
-    # Windows consoles default to legacy code pages (cp1252 etc.): force UTF-8
-    # on the CLI streams so output survives redirection (pipes, CI logs).
-    for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is not None:
-            with contextlib.suppress(OSError, ValueError):
-                reconfigure(encoding="utf-8", errors="replace")
+def cmd_gui(_args) -> int:
+    from pipeline.gui import main as gui_main
 
+    return gui_main()
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """The CLI surface. Kept separate so tests can validate generated argv."""
     ap = argparse.ArgumentParser(prog="hoi4port", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=f"hoi4port {__version__}")
+    argv = sys.argv[1:]
+    if argv[:1] == ["--cli"]:
+        # The frozen GUI re-invokes this executable to run one stage; strip the
+        # switch so the normal parser (and the normal CLI behaviour) applies.
+        argv = argv[1:]
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p_sync = sub.add_parser("sync", help="mirror Workshop mod -> staging")
@@ -316,7 +321,28 @@ def main() -> int:
                       help="cull_radius value to insert (default: 100)")
     p_ef.set_defaults(fn=cmd_entityfix)
 
-    args = ap.parse_args()
+    p_gui = sub.add_parser("gui", help="graphical front-end (Tkinter)")
+    p_gui.set_defaults(fn=cmd_gui)
+
+    return ap
+
+
+def main() -> int:
+    # Windows consoles default to legacy code pages (cp1252 etc.): force UTF-8
+    # on the CLI streams so output survives redirection (pipes, CI logs).
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            with contextlib.suppress(OSError, ValueError):
+                reconfigure(encoding="utf-8", errors="replace")
+
+    argv = sys.argv[1:]
+    if argv[:1] == ["--cli"]:
+        # The frozen GUI re-invokes this executable to run one stage; strip the
+        # switch so the normal parser (and the normal CLI behaviour) applies.
+        argv = argv[1:]
+
+    args = build_parser().parse_args(argv)
     return args.fn(args)
 
 

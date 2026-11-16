@@ -32,6 +32,16 @@ regole in `classify_token`, emerso correggendo BUG-06).
 > `tree_size` vs `rglob`, cache sprite vanilla, indice di esistenza
 > (directory, case, `..`). La pipeline completa è stata inoltre confrontata
 > old-vs-new: staging identico byte per byte.
+>
+> **Aggiornamento 1.3.0 (2026-11-17)**: **254 test**, tutti verdi. Nuovo
+> `test_gui.py` (26): ogni argv generato dalla GUI viene ripparsato con il
+> parser reale del CLI — ha subito trovato `convert`/`texfix` a cui la GUI
+> passava `--vanilla` (flag inesistente) —, classificazione delle severità del
+> log (`errori: 0` non è un errore), `Settings` (roundtrip, file corrotto, tipi
+> sbagliati, filtro fasi) e smoke del widget con `Tk()` (skippato senza
+> display). Verifica end-to-end: la GUI reale ha eseguito
+> `sync → scan → analyze → convert --apply` su una fixture, producendo i DDS e
+> il manifest, 0 errori.
 
 ## Come rieseguire
 

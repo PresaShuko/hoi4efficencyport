@@ -182,7 +182,7 @@ class VanillaSpriteCacheTest(BaseTest):
     def setUp(self):
         super().setUp()
         cache = self.ws.root / "cache"
-        patcher = mock.patch.object(scanner, "_cache_dir", lambda: cache)
+        patcher = mock.patch.object(scanner.fsutil, "cache_dir", lambda: cache)
         patcher.start()
         self.addCleanup(patcher.stop)
         self.van = self.ws.root / "van"

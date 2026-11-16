@@ -29,9 +29,10 @@ dependencies = ["Pillow>=10"]
 
 [project.scripts]
 hoi4port = "hoi4port:main"
+hoi4port-gui = "pipeline.gui:main"
 
 [tool.setuptools]
-py-modules = ["hoi4port"]
+py-modules = ["hoi4port", "hoi4port_gui"]
 packages = ["pipeline"]
 
 [tool.setuptools.dynamic]

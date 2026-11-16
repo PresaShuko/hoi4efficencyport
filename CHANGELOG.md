@@ -1,10 +1,37 @@
 # Changelog
 
-## Non rilasciato
+## 1.3.0 - 2026-11-17
+
+GUI Tkinter (`hoi4port gui`, `hoi4port-gui`, `hoi4port-gui.exe` windowed): nessuna
+dipendenza nuova, stesso motore del CLI.
+
+- Percorsi con `Sfoglia`/`Rileva` (mod, staging, output, vanilla) e percorso
+  risolto mostrato accanto ai campi relativi.
+- Le 10 fasi con stato per fase (`✓ 2.4 s`, `● in corso`, `✗ errore`), tag
+  `scrive`/`legge`, interruttore globale `Applica modifiche` (spento = dry-run)
+  con conferma che mostra la cartella che verrà modificata.
+- Opzioni: workers texconv, cap, cull radius, skip baseline, dedup vanilla,
+  solo-ref, continua dopo un errore.
+- Log live 9 righe con severità (`errori: 0` non è un errore), `Copia`,
+  `Svuota`, scrollbar custom, word-wrap; barra fasi, `Annulla` (kill del process
+  tree), `Apri output`, `error.log` (`check-log`).
+- Scorciatoie: `Ctrl+Invio` esegue, `Esc` annulla, `Ctrl+L` pulisce il log.
+- Stato dell'ultima sessione in `<cache>/hoi4port/gui.json`.
+- Build: `hoi4port-gui.exe` con `--windowed`; in esecuzione congelata la GUI
+  rilancia sé stessa con il flag nascosto `--cli` (isolamento dei crash e
+  cancellazione affidabile), mentre da checkout usa `python -m hoi4port`.
+- `hoi4port.build_parser()` estratto: un test verifica che **ogni** argv
+  generato dalla GUI sia accettato dal parser vero (ha trovato subito
+  `convert`/`texfix` che non accettano `--vanilla`).
+- `fsutil.cache_dir()` condivisa (prima privata in `scanner`).
+
+Correzioni:
 
 - `sync`: l'output di robocopy (riepilogo localizzato) viene decodificato con la
   code page OEM invece che UTF-8, quindi "Velocità"/"Terminato" non diventano
-  più "Velocit?". Regressione coperta da un test in `tests/test_fsutil.py`.
+  più "Velocit?". Regressione coperta da un test.
+
+Test: 254 (erano 229).
 
 ## 1.2.0 — 2026-11-16
 

@@ -162,18 +162,6 @@ def sprite_defs(root: Path, subdirs=("interface", "gfx")) -> set[str]:
 _SPRITE_CACHE_VERSION = 1
 
 
-def _cache_dir() -> Path:
-    """Per-user cache directory for install-scoped data."""
-    if os.name == "nt":
-        base = os.environ.get("LOCALAPPDATA")
-        root = Path(base) if base else Path.home() / "AppData" / "Local"
-    elif sys.platform == "darwin":
-        root = Path.home() / "Library" / "Caches"
-    else:
-        root = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
-    return root / "hoi4port"
-
-
 def vanilla_sprite_defs(vanilla: Path) -> set[str]:
     """sprite_defs(vanilla) cached per install stamp.
 
@@ -184,7 +172,7 @@ def vanilla_sprite_defs(vanilla: Path) -> set[str]:
     stamp = fsutil.install_stamp(vanilla)
     if stamp == "unknown":
         return sprite_defs(vanilla)
-    cache = _cache_dir() / f"vanilla_sprites_v{_SPRITE_CACHE_VERSION}_{stamp}.json"
+    cache = fsutil.cache_dir() / f"vanilla_sprites_v{_SPRITE_CACHE_VERSION}_{stamp}.json"
     try:
         return set(json.loads(cache.read_text(encoding="utf-8")))
     except (OSError, ValueError):

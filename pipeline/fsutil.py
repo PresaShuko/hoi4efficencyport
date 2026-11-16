@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
@@ -105,6 +106,18 @@ def tree_size(root: Path) -> int:
                 except OSError:
                     continue
     return total
+
+
+def cache_dir() -> Path:
+    """Per-user cache directory for install-scoped and UI state."""
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA")
+        root = Path(base) if base else Path.home() / "AppData" / "Local"
+    elif sys.platform == "darwin":
+        root = Path.home() / "Library" / "Caches"
+    else:
+        root = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+    return root / "hoi4port"
 
 
 def install_stamp(root: Path) -> str:

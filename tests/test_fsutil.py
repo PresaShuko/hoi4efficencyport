@@ -1,8 +1,11 @@
 """fsutil + tools: encoding roundtrips, iterators, hashing, staging sync, texconv resolution."""
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import os
+import shutil
 import unittest
 from unittest import mock
 
@@ -111,6 +114,21 @@ class SyncStagingTest(BaseTest):
         fsutil.sync_staging(src, dst)
         self.assertFalse((dst / "stale.txt").exists())
         self.assertTrue((dst / "gfx" / "a.png").is_file())
+
+    def test_robocopy_summary_decodes_without_replacement_chars(self):
+        """robocopy speaks the OEM code page; decoding as UTF-8 turned the
+        localized summary into 'Velocit\uFFFD'. Any U+FFFD here is a regression."""
+        if not shutil.which("robocopy"):
+            self.skipTest("robocopy is Windows-only")
+        src = self.ws.root / "src_enc"
+        (src / "citt\u00e0").mkdir(parents=True)
+        (src / "citt\u00e0" / "a.png").write_bytes(b"x")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            fsutil.sync_staging(src, self.ws.root / "dst_enc")
+        text = out.getvalue()
+        self.assertTrue(text.strip())
+        self.assertNotIn("\uFFFD", text)
 
 
 class TexconvTest(unittest.TestCase):

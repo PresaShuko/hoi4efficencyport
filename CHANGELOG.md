@@ -1,5 +1,11 @@
 # Changelog
 
+## Non rilasciato
+
+- `sync`: l'output di robocopy (riepilogo localizzato) viene decodificato con la
+  code page OEM invece che UTF-8, quindi "Velocità"/"Terminato" non diventano
+  più "Velocit?". Regressione coperta da un test in `tests/test_fsutil.py`.
+
 ## 1.2.0 — 2026-11-16
 
 Performance release. **Every produced file is byte-identical** to 1.1.0: the

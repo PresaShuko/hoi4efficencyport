@@ -133,7 +133,9 @@ def sync_staging(src: Path, dst: Path) -> None:
             ],
             capture_output=True,
             text=True,
-            encoding="utf-8",
+            # robocopy writes in the console's OEM code page (cp850 on it-IT),
+            # not UTF-8: decoding as UTF-8 mangled "Velocità"/"Terminato".
+            encoding="oem",
             errors="replace",
         )
         if result.returncode not in _ROBOCOPY_OK:

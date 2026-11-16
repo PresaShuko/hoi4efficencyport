@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 from collections.abc import Iterable, Iterator
@@ -44,11 +45,29 @@ def write_json(path: Path, data: Any, indent: int = 1) -> None:
 
 
 def iter_files(root: Path, exts: Iterable[str]) -> Iterator[Path]:
-    """Files under ``root`` whose suffix is in ``exts`` (case-insensitive)."""
+    """Files under ``root`` whose suffix is in ``exts`` (case-insensitive).
+
+    os.scandir instead of Path.rglob: the dirent already carries the file
+    type, so no per-entry stat (rglob+is_file is ~16x slower on Windows).
+    Directory symlinks are not followed (same as Path.rglob); file symlinks
+    are yielded.
+    """
     wanted = {e.lower() for e in exts}
-    for p in root.rglob("*"):
-        if p.is_file() and p.suffix.lower() in wanted:
-            yield p
+    stack = [os.fspath(root)]
+    while stack:
+        try:
+            entries = os.scandir(stack.pop())
+        except OSError:
+            continue
+        with entries:
+            for entry in entries:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(entry.path)
+                    elif entry.is_file() and os.path.splitext(entry.name)[1].lower() in wanted:
+                        yield Path(entry.path)
+                except OSError:
+                    continue
 
 
 def iter_text_files(root: Path) -> Iterator[Path]:
@@ -65,6 +84,27 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def tree_size(root: Path) -> int:
+    """Total size of the regular files under ``root`` (scandir, no rglob)."""
+    total = 0
+    stack = [os.fspath(root)]
+    while stack:
+        try:
+            entries = os.scandir(stack.pop())
+        except OSError:
+            continue
+        with entries:
+            for entry in entries:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(entry.path)
+                    elif entry.is_file():
+                        total += entry.stat().st_size
+                except OSError:
+                    continue
+    return total
 
 
 def install_stamp(root: Path) -> str:

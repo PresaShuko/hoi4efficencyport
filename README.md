@@ -94,6 +94,10 @@ no-op (idempotent).
 - **Vanilla not found** (non-standard Steam library): `--vanilla <path>`.
 - **Game log**: `check-log` looks for `error.log` in the standard Windows
   (including OneDrive), Linux (Proton and native) and macOS locations.
+- **Cache**: vanilla sprite names are cached under `%LOCALAPPDATA%\hoi4port\`
+  (Linux `$XDG_CACHE_HOME/hoi4port`, macOS `~/Library/Caches/hoi4port`),
+  keyed by a hash of the install's `launcher-settings.json`; a game update
+  invalidates it automatically. Deleting the folder is always safe.
 
 ## License
 

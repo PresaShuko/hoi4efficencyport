@@ -1,5 +1,52 @@
 # Changelog
 
+## 1.2.0 — 2026-11-16
+
+Performance release. **Every produced file is byte-identical** to 1.1.0: the
+whole pipeline was run old-vs-new on the same mod and every staging file,
+`asset_plan.json`, `scan.json`, `mesh_stats.json` and `validate.json`
+compared equal; `convert`/`texfix` outputs were compared byte by byte,
+including the format choice.
+
+Measured on a synthetic mod (700 text files / 128k lines, 160 textures =
+42.2 MB, 150 meshes, 600 vanilla `.gfx`; Windows 11, Python 3.13):
+
+| Stage | before | after |
+|---|---|---|
+| `scan` | 2315 ms | **865 ms** (−63%) |
+| `scan` with vanilla | 2938 ms | **1062 ms** (−64%) |
+| `validate` | 2332 ms | **910 ms** (−61%) |
+| `analyze.plan` | 195 ms | **164 ms** (−16%) |
+| `texfix` on a 512² raw DDS | 389 ms | **41 ms** (−89%) |
+| `import hoi4port` (fresh process) | 150 ms | **87 ms** (−42%) |
+
+How (all output-preserving):
+
+- `scanner`: one scandir walk builds an existence index; reference tokens are
+  resolved by set lookup instead of one `stat()` per token (`Path.exists()`
+  costs ~20 µs on Windows). Entity-relative resolution is indexed too;
+  absolute paths, `..`, padded cases still use the real `stat()`.
+- `scanner`: one split per file plus per-line comment fast path, string
+  suffix checks instead of `Path(...).suffix`, and lines without a quote or
+  `GFX_` skip the corresponding regex.
+- `scanner`: vanilla spriteType names cached per install stamp
+  (`<cache>/hoi4port/vanilla_sprites_v1_<stamp>.json`; cache directory is
+  `%LOCALAPPDATA%`, `$XDG_CACHE_HOME` or `~/Library/Caches`). Disabled when
+  the install has no `launcher-settings.json`.
+- `fsutil`: `iter_files` and `tree_size` use `os.scandir` (16–27× faster than
+  `rglob`+`stat`); directory symlinks are not followed, like `Path.rglob`.
+- `dds.alpha_opaque`: exact BC1/BC3 alpha decision for uncompressed 32-bit
+  DDS read from the pixel bytes (0.8 ms instead of a 330 ms Pillow decode).
+  It returns None for compressed/exotic/padded files, so the old path is
+  used there; a differential test asserts the same answer as Pillow.
+- `texfix`: raw DDS that needs no resize is fed to texconv directly (no
+  Pillow decode, no PNG round-trip); format/mips unchanged.
+- `convert`: 8-bit RGB/RGBA PNGs that need no resize/padding are fed to
+  texconv directly instead of being decoded and re-saved.
+- CLI: pipeline modules are imported per subcommand (PIL no longer loaded for
+  `sync`, `scan`, ...).
+- `analyze`: size comes from the bytes already read (no extra `stat`).
+
 ## 1.1.0 — 2026-11-16
 
 Internal cleanup release: no pipeline behaviour change, but three

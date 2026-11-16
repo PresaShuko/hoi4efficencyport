@@ -83,6 +83,17 @@ class ShaTest(BaseTest):
             hashlib.sha256(b"abc").hexdigest())
 
 
+class TreeSizeTest(BaseTest):
+    def test_matches_rglob_sum(self):
+        self.ws.write("a.txt", "x")
+        self.ws.make_png("gfx/b.png")
+        self.ws.make_raw_dds("gfx/c.dds")
+        want = sum(p.stat().st_size for p in self.ws.modsrc.rglob("*")
+                   if p.is_file())
+        self.assertEqual(fsutil.tree_size(self.ws.modsrc), want)
+        self.assertEqual(fsutil.tree_size(self.ws.root / "nope"), 0)
+
+
 class SyncStagingTest(BaseTest):
     def test_missing_source_exits(self):
         with self.assertRaises(SystemExit):

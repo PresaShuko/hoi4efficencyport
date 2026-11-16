@@ -25,6 +25,13 @@ regole in `classify_token`, emerso correggendo BUG-06).
 > `test_texfix.ExpectedMipsReference`, tautologico (`texfix.expected_mips` è
 > importato da `meshscan`); la copertura dei vettori mip resta in
 > `test_meshscan.ExpectedMipsTest`. Aggiunto il filtro `run_all.py -k`.
+>
+> **Aggiornamento 1.2.0 (2026-11-16)**: **228 test**, tutti verdi. Nuovi:
+> `test_dds` (equivalenza esatta `alpha_opaque` ↔ Pillow, gate PNG),
+> regressioni byte-per-byte dei percorsi diretti `texfix`/`convert`,
+> `tree_size` vs `rglob`, cache sprite vanilla, indice di esistenza
+> (directory, case, `..`). La pipeline completa è stata inoltre confrontata
+> old-vs-new: staging identico byte per byte.
 
 ## Come rieseguire
 

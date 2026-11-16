@@ -13,18 +13,39 @@ import tempfile
 from collections import Counter
 from pathlib import Path
 
-from . import fsutil, images, parallel
+from . import dds, fsutil, images, parallel
 from .tools import convert_to_dds, texconv_command
 
 
 def _fmt_for(entry: dict, root: Path) -> str:
     alpha = entry.get("alpha")
     if entry["action"] == "reencode" and alpha == "dds":
-        try:
-            alpha = images.alpha_kind(images.load_rgba(root / entry["path"]))
-        except Exception:
-            alpha = None
+        path = root / entry["path"]
+        # Uncompressed DDS: decide from the pixels without decoding (exact,
+        # same answer as the Pillow path); anything else falls back.
+        opaque = dds.alpha_opaque(path)
+        if opaque is None:
+            try:
+                alpha = images.alpha_kind(images.load_rgba(path))
+            except Exception:
+                alpha = None
+        else:
+            alpha = "opaque" if opaque else "gradient"
     return "DXT1" if alpha == "opaque" else "DXT5"
+
+
+def _png_direct(path: Path) -> bool:
+    """8-bit RGB/RGBA PNG: decoding and re-saving it is pixel-identical, so
+    texconv can read the source file directly (no Pillow decode/encode)."""
+    if path.suffix.lower() != ".png":
+        return False
+    try:
+        with path.open("rb") as f:
+            head = f.read(26)
+    except OSError:
+        return False
+    return (len(head) == 26 and head[:8] == b"\x89PNG\r\n\x1a\n"
+            and head[24] == 8 and head[25] in (2, 6))
 
 
 def _convert_one(entry: dict, root: Path, cmd: list[str]) -> dict:
@@ -41,12 +62,23 @@ def _convert_one(entry: dict, root: Path, cmd: list[str]) -> dict:
         with tempfile.TemporaryDirectory() as td:
             tdp = Path(td)
             if entry["action"] == "convert":
-                img = images.load_rgba(src)
-                img, resized = images.resize_cap(img, entry["cap"])
-                img, pw, ph = images.pad_to_4(img)
-                padded = bool(pw or ph)
-                feed = tdp / f"{src.stem}.png"
-                img.save(feed)
+                # Nothing to resize/pad: the source already has the pixels
+                # texconv would receive, so skip the decode + PNG round-trip.
+                w, h = entry.get("w"), entry.get("h")
+                cap = entry.get("cap")
+                if (entry.get("alpha") in ("opaque", "binary", "gradient")
+                        and w and h and cap is not None
+                        and w % 4 == 0 and h % 4 == 0
+                        and max(w, h) <= cap
+                        and _png_direct(src)):
+                    feed = src
+                else:
+                    img = images.load_rgba(src)
+                    img, resized = images.resize_cap(img, entry["cap"])
+                    img, pw, ph = images.pad_to_4(img)
+                    padded = bool(pw or ph)
+                    feed = tdp / f"{src.stem}.png"
+                    img.save(feed)
             else:  # reencode of uncompressed dds
                 feed = src
             out = tdp / f"{src.stem}.dds"

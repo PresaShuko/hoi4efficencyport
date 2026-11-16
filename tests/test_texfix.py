@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from PIL import Image
 
@@ -171,6 +172,38 @@ class RunTest(BaseTest):
         mf = json.loads((self.ws.build / "texfix_manifest.json").read_text("utf-8"))
         self.assertTrue(all(m.get("skipped") for m in mf["ok"]))
         self.assertEqual(mf["failed"], [])
+
+
+@unittest.skipUnless(TEXCONV, "texconv required")
+class DirectPathTest(BaseTest):
+    """The decode-free path must produce the same bytes as the old one."""
+
+    def _pair(self, color):
+        direct = self.ws.make_raw_dds("gfx/models/direct.dds", w=8, h=8, color=color)
+        old = self.ws.modsrc / "gfx/models/old.dds"
+        old.write_bytes(direct.read_bytes())
+        return direct, old
+
+    def test_opaque_matches_pillow_roundtrip(self):
+        direct, old = self._pair((1, 2, 3, 255))
+        rec = texfix._fix_one(direct, None, CMD)
+        self.assertTrue(rec["ok"], rec)
+        self.assertFalse(rec["resized_cap"] or rec["non_pow2_resized"])
+        with mock.patch.object(texfix.dds, "alpha_opaque", lambda _: None):
+            rec_old = texfix._fix_one(old, None, CMD)
+        self.assertTrue(rec_old["ok"], rec_old)
+        self.assertEqual(rec["fmt"], rec_old["fmt"])
+        self.assertEqual(direct.read_bytes(), old.read_bytes())
+
+    def test_gradient_matches_pillow_roundtrip(self):
+        direct, old = self._pair((1, 2, 3, 128))
+        rec = texfix._fix_one(direct, None, CMD)
+        self.assertTrue(rec["ok"], rec)
+        with mock.patch.object(texfix.dds, "alpha_opaque", lambda _: None):
+            rec_old = texfix._fix_one(old, None, CMD)
+        self.assertEqual(rec["fmt"], "DXT5")
+        self.assertEqual(rec["fmt"], rec_old["fmt"])
+        self.assertEqual(direct.read_bytes(), old.read_bytes())
 
 
 if __name__ == "__main__":

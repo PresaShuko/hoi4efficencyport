@@ -109,15 +109,18 @@ def plan(root: Path, scan_result: dict, vanilla_hash: dict | None) -> dict:
         cls = classify(rel)
         entry = {
             "path": rel,
-            "bytes": fp.stat().st_size,
+            "bytes": 0,
             "class": cls,
             "refs": ref_count.get(rel.lower(), 0),
         }
-        # One read feeds both the Pillow decode and the dedup hash (C5).
+        # One read feeds both the Pillow decode and the dedup hash (C5);
+        # the length it already returns replaces the extra stat().
         try:
             raw = fp.read_bytes()
+            entry["bytes"] = len(raw)
         except OSError as e:
             raw = b""
+            entry["bytes"] = fp.stat().st_size
             errors.append(f"read {rel} ({e})")
         w = h = 0
         if raw:

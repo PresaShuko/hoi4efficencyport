@@ -32,10 +32,6 @@ GAME_LOG_CANDIDATES = (
 )
 
 
-def _tree_size(p: Path) -> int:
-    return sum(f.stat().st_size for f in p.rglob("*") if f.is_file())
-
-
 def run(root: Path, workshop: Path | None, out: Path, vanilla: Path | None) -> int:
     out.mkdir(parents=True, exist_ok=True)
     problems: list[str] = []
@@ -106,8 +102,8 @@ def run(root: Path, workshop: Path | None, out: Path, vanilla: Path | None) -> i
         print("convert_manifest.json missing: skipping the DDS header check.")
 
     scan = scanner.scan(root, vanilla)
-    st_size = _tree_size(root)
-    ws_size = _tree_size(workshop) if workshop is not None and workshop.is_dir() else 0
+    st_size = fsutil.tree_size(root)
+    ws_size = fsutil.tree_size(workshop) if workshop is not None and workshop.is_dir() else 0
     referenced = {r["token"] for r in scan["references"] if r["exists"]}
     orphans = sum(
         1 for p in gfx_entries

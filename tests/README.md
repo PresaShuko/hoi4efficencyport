@@ -23,6 +23,7 @@ I test sono tracciati in git e la CI (`ci.yml`) li esegue su Ubuntu e Windows:
 | `test_scanner.py` | riferimenti, sprite, missing/noise/suspect, indici, baseline con stamp |
 | `test_normalize.py` | classificazione, move/repair, rewrite, idempotenza |
 | `test_analyze.py` | classi, caps, alpha (`images.alpha_kind`), dedup, unused, report |
+| `test_dds.py` | header DDS e `alpha_opaque` (equivalenza esatta con Pillow), gate PNG pass-through |
 | `test_convert.py` | padding (`images.pad_to_4`), formati, texconv reale, guards |
 | `test_texfix.py` | header DDS (`dds.read_header`), mips, pow2, fix reali, idempotenza |
 | `test_meshscan.py` | parser .mesh binario, medians, baseline con stamp, report |

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from unittest import mock
 
 from _harness import BaseTest
 from pipeline import scanner
@@ -175,6 +176,57 @@ class WriteReportTest(BaseTest):
         text = out.read_text(encoding="utf-8")
         self.assertIn("TRUE missing: 0", text)
         self.assertIn("spriteType defined (mod): 1", text)
+
+
+class VanillaSpriteCacheTest(BaseTest):
+    def setUp(self):
+        super().setUp()
+        cache = self.ws.root / "cache"
+        patcher = mock.patch.object(scanner, "_cache_dir", lambda: cache)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.van = self.ws.root / "van"
+        (self.van / "interface").mkdir(parents=True)
+        (self.van / "interface" / "v.gfx").write_text(
+            'spriteType = {\n name = "GFX_v"\n}\n', encoding="utf-8")
+        (self.van / "launcher-settings.json").write_text(
+            '{"version": "1.0"}', encoding="utf-8")
+
+    def test_second_call_reads_the_cache(self):
+        self.assertEqual(scanner.vanilla_sprite_defs(self.van), {"GFX_v"})
+        with mock.patch.object(scanner, "sprite_defs",
+                               side_effect=AssertionError("re-parsed")):
+            self.assertEqual(scanner.vanilla_sprite_defs(self.van), {"GFX_v"})
+
+    def test_unknown_install_stamp_bypasses_the_cache(self):
+        with mock.patch.object(scanner.fsutil, "install_stamp",
+                               lambda _: "unknown"), \
+                mock.patch.object(scanner, "sprite_defs",
+                                  return_value={"GFX_x"}) as fake:
+            scanner.vanilla_sprite_defs(self.van)
+            scanner.vanilla_sprite_defs(self.van)
+        self.assertEqual(fake.call_count, 2)
+
+
+class ExistenceIndexTest(BaseTest):
+    def test_directory_ref_exists(self):
+        self.ws.make_png("gfx/interface/goals/g.png")
+        self.ws.write("common/a.txt", 'd = "gfx/interface/goals/"\n')
+        ref = {r["token"]: r for r in scanner.scan(self.ws.modsrc)["references"]}
+        self.assertTrue(ref["gfx/interface/goals/"]["exists"])
+
+    def test_case_variant_matches_platform_exists(self):
+        self.ws.make_png("gfx/interface/goals/g.png")
+        self.ws.write("common/a.txt", 'c = "GFX/Interface/goals/g.png"\n')
+        ref = {r["token"]: r for r in scanner.scan(self.ws.modsrc)["references"]}
+        want = (self.ws.modsrc / "GFX/Interface/goals/g.png").exists()
+        self.assertEqual(ref["GFX/Interface/goals/g.png"]["exists"], want)
+
+    def test_parent_escape_falls_back_to_stat(self):
+        self.ws.make_png("gfx/interface/g.png")
+        self.ws.write("gfx/sub/a.txt", 'r = "../interface/g.png"\n')
+        ref = {r["token"]: r for r in scanner.scan(self.ws.modsrc)["references"]}
+        self.assertTrue(ref["../interface/g.png"]["exists"])
 
 
 if __name__ == "__main__":

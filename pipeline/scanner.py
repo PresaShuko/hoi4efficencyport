@@ -8,7 +8,10 @@ Collects from every text file in the mod:
 from __future__ import annotations
 
 import json
+import os
+import posixpath
 import re
+import sys
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,8 +35,16 @@ CONVENTION_DIRS = ("gfx/flags/", "gfx/models/", "gfx/entities/", "gfx/fonts/")
 TEXTURE_SKIP_DIRS = ("gfx/models/", "gfx/entities/", "gfx/flags/")
 
 
+def _suffix(token: str) -> str:
+    """Last-component suffix, with the same semantics as ``Path(token).suffix``
+    (empty for '.png' dotfiles, trailing separators and names without a dot)."""
+    name = token.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    i = name.rfind(".")
+    return name[i:].lower() if i > 0 else ""
+
+
 def _has_asset_ext(token: str) -> bool:
-    return Path(token).suffix.lower() in fsutil.ASSET_EXTS
+    return _suffix(token) in fsutil.ASSET_EXTS
 
 
 def _looks_like_path(token: str) -> bool:
@@ -42,29 +53,77 @@ def _looks_like_path(token: str) -> bool:
     return _has_asset_ext(token)
 
 
-def _resolve(root: Path, token: str) -> Path:
-    p = Path(token)
-    return p if p.is_absolute() else root / p
+# --- existence index -----------------------------------------------------------
+# One scandir walk replaces one stat() per reference token. Path.exists() costs
+# ~20 us on Windows (Defender); a mod with 20k references pays ~0.4 s in stats.
+# Keys are relative posix paths; case folding follows the platform default.
+
+_CASE_INSENSITIVE = os.name == "nt" or sys.platform == "darwin"
+
+
+def _index_key(rel: str) -> str:
+    return rel.lower() if _CASE_INSENSITIVE else rel
+
+
+def _plain_rel(token: str) -> str | None:
+    """Normalized relative path, or None when a real stat() is required.
+
+    Absolute paths, drive letters, leading separators and '..' keep the
+    original Path.exists() behaviour (the index covers only the tree).
+    """
+    t = token.replace("\\", "/")
+    if not t or t[0] == "/" or (len(t) > 1 and t[1] == ":"):
+        return None
+    if ".." in t.split("/"):
+        return None
+    return posixpath.normpath(t)
+
+
+def _walk_index(root: Path) -> set[str]:
+    """Relative keys of every file and directory under ``root``."""
+    keys: set[str] = set()
+    base = os.fspath(root)
+    stack = [base]
+    while stack:
+        try:
+            entries = os.scandir(stack.pop())
+        except OSError:
+            continue
+        with entries:
+            for entry in entries:
+                try:
+                    recurse = entry.is_dir(follow_symlinks=False)
+                    if not (recurse or entry.is_file() or entry.is_dir()):
+                        continue  # broken symlink / special file: not "exists"
+                except OSError:
+                    continue
+                keys.add(_index_key(os.path.relpath(entry.path, base)
+                                    .replace(os.sep, "/")))
+                if recurse:
+                    stack.append(entry.path)
+    return keys
 
 
 def _norm(token: str) -> str:
     return token.replace("\\", "/")
 
 
+def _strip_line(line: str) -> str:
+    """Remove a trailing #comment (outside quotes) from one line."""
+    if "#" not in line:  # fast path: most lines carry no comment at all
+        return line
+    in_q = False
+    for i, ch in enumerate(line):
+        if ch == '"':
+            in_q = not in_q
+        elif ch == "#" and not in_q:
+            return line[:i]
+    return line
+
+
 def strip_comments(text: str) -> str:
     """Strip #comments (outside quotes): .gfx files are full of commented-out blocks."""
-    out = []
-    for line in text.splitlines():
-        in_q = False
-        cut = len(line)
-        for i, ch in enumerate(line):
-            if ch == '"':
-                in_q = not in_q
-            elif ch == "#" and not in_q:
-                cut = i
-                break
-        out.append(line[:cut])
-    return "\n".join(out)
+    return "\n".join(_strip_line(line) for line in text.splitlines())
 
 
 def sprite_defs_in_text(text: str) -> dict[str, dict]:
@@ -100,12 +159,77 @@ def sprite_defs(root: Path, subdirs=("interface", "gfx")) -> set[str]:
     return names
 
 
+_SPRITE_CACHE_VERSION = 1
+
+
+def _cache_dir() -> Path:
+    """Per-user cache directory for install-scoped data."""
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA")
+        root = Path(base) if base else Path.home() / "AppData" / "Local"
+    elif sys.platform == "darwin":
+        root = Path.home() / "Library" / "Caches"
+    else:
+        root = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+    return root / "hoi4port"
+
+
+def vanilla_sprite_defs(vanilla: Path) -> set[str]:
+    """sprite_defs(vanilla) cached per install stamp.
+
+    The vanilla tree is constant between game updates, but scan runs in every
+    pipeline stage: re-parsing thousands of .gfx costs seconds per command.
+    A missing launcher-settings.json (stamp "unknown") disables the cache.
+    """
+    stamp = fsutil.install_stamp(vanilla)
+    if stamp == "unknown":
+        return sprite_defs(vanilla)
+    cache = _cache_dir() / f"vanilla_sprites_v{_SPRITE_CACHE_VERSION}_{stamp}.json"
+    try:
+        return set(json.loads(cache.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        pass
+    names = sprite_defs(vanilla)
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        fsutil.write_json(cache, sorted(names), indent=0)
+    except OSError:
+        pass
+    return names
+
+
 def scan(root: Path, vanilla: Path | None = None) -> dict:
     references: dict[str, dict] = {}   # normalized token -> record
     gfx_refs: dict[str, dict] = {}     # sprite name -> {quoted: [...], bare: [...]}
     sprite_types: dict[str, dict] = {}   # name -> {texturefile, noOfFrames, file}
     enc_stats: Counter[str] = Counter()
     unreadable: list[str] = []
+    root_index = _walk_index(root)
+    vanilla_index: set[str] | None = None
+
+    def _exists(referencer: Path, token: str) -> bool:
+        """Same answer as (root/token).exists() or (referencer.parent/token).exists()."""
+        rel = _plain_rel(token)
+        if rel is None:
+            return (root / token).exists() or (referencer.parent / token).exists()
+        if _index_key(rel) in root_index:
+            return True
+        # entity .gfx files resolve paths relative to their own folder
+        parent = referencer.parent
+        if parent != root:
+            ent = _plain_rel(parent.relative_to(root).as_posix() + "/" + token)
+            if ent is not None and _index_key(ent) in root_index:
+                return True
+        return False
+
+    def _in_vanilla(token: str) -> bool:
+        nonlocal vanilla_index
+        rel = _plain_rel(token)
+        if rel is None:
+            return (vanilla / token).exists()
+        if vanilla_index is None:
+            vanilla_index = _walk_index(vanilla)
+        return _index_key(rel) in vanilla_index
 
     for fp in sorted(fsutil.iter_text_files(root)):
         rel = fp.relative_to(root).as_posix()
@@ -118,21 +242,27 @@ def scan(root: Path, vanilla: Path | None = None) -> dict:
             unreadable.append(f"{rel} ({e})")
             continue
         enc_stats[enc] += 1
-        text = strip_comments(text)
+        # One split for the whole file: .gfx sprite blocks need the joined
+        # text, the line loop below uses the same stripped lines.
+        stripped = [_strip_line(line) for line in text.splitlines()]
         local_defs: set[str] = set()   # sprite names DEFINED by this file
 
         if fp.suffix.lower() == ".gfx":
             # spriteType blocks span multiple lines: match on the whole text.
             # Names defined here are recorded and excluded from gfx_refs
             # below: a definition is not a usage (BUG-06).
-            for name, meta in sprite_defs_in_text(text).items():
+            for name, meta in sprite_defs_in_text("\n".join(stripped)).items():
                 sprite_types[name] = {**meta, "file": rel}
                 local_defs.add(name)
 
-        for lineno, line in enumerate(text.splitlines(), 1):
+        for lineno, line in enumerate(stripped, 1):
             # One pass for the quoted tokens; the spans are reused by the
-            # GFX_* classification below (quoted vs bare).
-            quoted = [(m.group(1), m.span()) for m in QUOTED_RE.finditer(line)]
+            # GFX_* classification below (quoted vs bare). Lines without a
+            # quote (or without "GFX_") skip the corresponding regex.
+            quoted = (
+                [(m.group(1), m.span()) for m in QUOTED_RE.finditer(line)]
+                if '"' in line else []
+            )
             for token, _ in quoted:
                 if not _looks_like_path(token):
                     continue
@@ -152,32 +282,30 @@ def scan(root: Path, vanilla: Path | None = None) -> dict:
                     continue
                 # PDX resolves paths from the mod root; entity .gfx files
                 # also use paths relative to their own folder.
-                ref["exists"] = (
-                    _resolve(root, token).exists()
-                    or (fp.parent / token).exists()
-                )
+                ref["exists"] = _exists(fp, token)
                 if (
                     not ref["exists"]
                     and vanilla is not None
                     and not Path(token).is_absolute()
                 ):
-                    ref["in_vanilla"] = (vanilla / token).exists()
-            for m in GFX_NAME_RE.finditer(line):
-                if m.group(0) in local_defs:
-                    continue  # this .gfx file DEFINES it: not a usage (BUG-06)
-                rec = gfx_refs.setdefault(m.group(0), {"quoted": [], "bare": []})
-                start, end = m.span()
-                bucket = (
-                    "quoted"
-                    if any(qs <= start and end <= qe for _, (qs, qe) in quoted)
-                    else "bare"
-                )
-                rec[bucket].append(f"{rel}:{lineno}")
+                    ref["in_vanilla"] = _in_vanilla(token)
+            if "GFX_" in line:
+                for m in GFX_NAME_RE.finditer(line):
+                    if m.group(0) in local_defs:
+                        continue  # this .gfx file DEFINES it: not a usage (BUG-06)
+                    rec = gfx_refs.setdefault(m.group(0), {"quoted": [], "bare": []})
+                    start, end = m.span()
+                    bucket = (
+                        "quoted"
+                        if any(qs <= start and end <= qe for _, (qs, qe) in quoted)
+                        else "bare"
+                    )
+                    rec[bucket].append(f"{rel}:{lineno}")
 
     missing_paths = [r for r in references.values() if r["exists"] is False]
     defined = set(sprite_types)
     referenced_names = set(gfx_refs)
-    vanilla_sprites = sprite_defs(vanilla) if vanilla is not None else set()
+    vanilla_sprites = vanilla_sprite_defs(vanilla) if vanilla is not None else set()
     gfx_missing = sorted(referenced_names - defined - vanilla_sprites)
     gfx_covered_vanilla = sorted((referenced_names & vanilla_sprites) - defined)
 

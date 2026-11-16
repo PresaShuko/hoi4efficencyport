@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from unittest import mock
 
 from PIL import Image
 
@@ -166,6 +167,26 @@ class RunTest(BaseTest):
         self.assertEqual(rc, 0)
         mf = json.loads((self.ws.build / "convert_manifest.json").read_text("utf-8"))
         self.assertEqual(len(mf["failed"]), 1)
+
+
+@unittest.skipUnless(TEXCONV, "texconv required")
+class PassThroughTest(BaseTest):
+    def test_png_pass_through_matches_decode_path(self):
+        src = self.ws.make_png("gfx/interface/a.png", w=8, h=8, mode="RGB")
+        twin = self.ws.modsrc / "gfx/interface/b.png"
+        twin.write_bytes(src.read_bytes())
+        base = {"action": "convert", "alpha": "opaque", "cap": 256,
+                "bytes": src.stat().st_size, "w": 8, "h": 8}
+        rec = convert._convert_one(dict(base, path="gfx/interface/a.png"),
+                                   self.ws.modsrc, CMD)
+        with mock.patch.object(convert, "_png_direct", lambda _: False):
+            rec_old = convert._convert_one(dict(base, path="gfx/interface/b.png"),
+                                           self.ws.modsrc, CMD)
+        self.assertTrue(rec["ok"], rec)
+        self.assertTrue(rec_old["ok"], rec_old)
+        self.assertEqual(rec["fmt"], rec_old["fmt"])
+        self.assertEqual((self.ws.modsrc / "gfx/interface/a.dds").read_bytes(),
+                         (self.ws.modsrc / "gfx/interface/b.dds").read_bytes())
 
 
 if __name__ == "__main__":

@@ -25,8 +25,7 @@ import contextlib
 import json
 import sys
 
-from pipeline import (__version__, analyze, convert, cutover, entityfix,
-                      fsutil, meshscan, normalize, scanner, texfix, validate)
+from pipeline import __version__
 from pipeline.config import load_config, workshop_candidates
 
 
@@ -39,6 +38,8 @@ def require_staging(cfg) -> int | None:
 
 
 def cmd_sync(args) -> int:
+    from pipeline import fsutil
+
     cfg = load_config(mod=args.mod, staging=args.staging)
     if cfg.workshop_mod is None:
         print("Source mod not determined "
@@ -61,6 +62,8 @@ def cmd_sync(args) -> int:
 
 
 def cmd_scan(args) -> int:
+    from pipeline import fsutil, scanner
+
     cfg = load_config(mod=args.mod, staging=args.staging, vanilla=args.vanilla, out=args.out)
     rc = require_staging(cfg)
     if rc:
@@ -96,6 +99,8 @@ def cmd_scan(args) -> int:
 
 
 def cmd_normalize(args) -> int:
+    from pipeline import normalize
+
     cfg = load_config(mod=args.mod, staging=args.staging, vanilla=args.vanilla, out=args.out)
     normalize.run(cfg.staging, cfg.out, apply=args.apply, vanilla=cfg.vanilla,
                   do_moves=not args.no_moves)
@@ -103,6 +108,8 @@ def cmd_normalize(args) -> int:
 
 
 def cmd_analyze(args) -> int:
+    from pipeline import analyze, fsutil, scanner
+
     cfg = load_config(mod=args.mod, staging=args.staging, vanilla=args.vanilla, out=args.out)
     rc = require_staging(cfg)
     if rc:
@@ -135,6 +142,8 @@ def cmd_analyze(args) -> int:
 
 
 def cmd_convert(args) -> int:
+    from pipeline import convert
+
     cfg = load_config(mod=args.mod, staging=args.staging, out=args.out)
     rc = require_staging(cfg)
     if rc:
@@ -144,6 +153,8 @@ def cmd_convert(args) -> int:
 
 
 def cmd_cutover(args) -> int:
+    from pipeline import cutover
+
     cfg = load_config(mod=args.mod, staging=args.staging, vanilla=args.vanilla, out=args.out)
     rc = require_staging(cfg)
     if rc:
@@ -154,6 +165,8 @@ def cmd_cutover(args) -> int:
 
 
 def cmd_validate(args) -> int:
+    from pipeline import validate
+
     cfg = load_config(mod=args.mod, staging=args.staging, vanilla=args.vanilla, out=args.out)
     rc = require_staging(cfg)
     if rc:
@@ -162,21 +175,29 @@ def cmd_validate(args) -> int:
 
 
 def cmd_check_log(args) -> int:
+    from pipeline import validate
+
     return validate.check_log(tail=args.tail)
 
 
 def cmd_meshscan(args) -> int:
+    from pipeline import meshscan
+
     cfg = load_config(mod=args.mod, staging=args.staging, vanilla=args.vanilla, out=args.out)
     return meshscan.run(cfg.staging, cfg.out, cfg.vanilla, skip_vanilla=args.skip_vanilla)
 
 
 def cmd_texfix(args) -> int:
+    from pipeline import texfix
+
     cfg = load_config(mod=args.mod, staging=args.staging, out=args.out)
     return texfix.run(cfg.staging, cfg.out, apply=args.apply,
                       workers=args.workers, cap=args.cap, no_wine=args.no_wine)
 
 
 def cmd_entityfix(args) -> int:
+    from pipeline import entityfix
+
     cfg = load_config(mod=args.mod, staging=args.staging, vanilla=args.vanilla, out=args.out)
     return entityfix.run(cfg.staging, cfg.out, apply=args.apply,
                          vanilla=cfg.vanilla, cull_radius=args.cull_radius)

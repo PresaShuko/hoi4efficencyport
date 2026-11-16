@@ -41,3 +41,59 @@ def fourcc_file(path: Path) -> str:
             return fourcc(f.read(HEADER_SIZE))
     except OSError:
         return "?"
+
+
+# DDS_PIXELFORMAT layout (offsets inside the 128-byte header).
+_PF_FLAGS = 80
+_PF_FOURCC = 84
+_PF_BITCOUNT = 88
+_PF_AMASK = 104
+_DDPF_RGB = 0x40
+_PITCH = 20
+
+
+def alpha_opaque(path: Path) -> bool | None:
+    """Exact answer to ``alpha_kind(load_rgba(path)) == "opaque"`` for the
+    uncompressed DDS cases it can decide from the pixels, without decoding.
+
+    Returns None when the caller must decode (compressed DDS, exotic formats,
+    padded rows, truncated/malformed payload). The alpha plane is inspected
+    byte by byte: "opaque" means every alpha sample is 255, exactly what
+    Pillow's extrema check reports, so the BC1/BC3 choice cannot change.
+    """
+    try:
+        with path.open("rb") as f:
+            head = f.read(HEADER_SIZE)
+            if len(head) < HEADER_SIZE or head[:4] != MAGIC:
+                return None
+            if head[_PF_FOURCC:_PF_FOURCC + 4] != b"\0\0\0\0":
+                return None  # compressed (DXT*/BC*): Pillow decode
+            (flags,) = struct.unpack_from("<I", head, _PF_FLAGS)
+            if not flags & _DDPF_RGB:
+                return None  # luminance/alpha-only/other: let Pillow decide
+            (bits,) = struct.unpack_from("<I", head, _PF_BITCOUNT)
+            (amask,) = struct.unpack_from("<I", head, _PF_AMASK)
+            if amask == 0:
+                return True  # no alpha channel -> always opaque
+            if bits != 32:
+                return None  # 16-bit alpha masks: Pillow decode
+            low = amask & -amask          # lowest set bit of the alpha mask
+            span = amask // low + 1
+            if span & (span - 1):
+                return None  # non-contiguous mask: Pillow decode
+            offset = (low.bit_length() - 1) // 8
+            if amask != 0xFF << (8 * offset):
+                return None  # not a full byte: Pillow decode
+            (pitch,) = struct.unpack_from("<I", head, _PITCH)
+            height, width = struct.unpack_from("<II", head, 12)
+            if pitch != width * 4 or width == 0 or height == 0:
+                return None  # padded rows / malformed: Pillow decode
+            need = pitch * height
+            if len(f.read(need)) < need:
+                return None
+            f.seek(HEADER_SIZE)
+            payload = f.read(need)
+    except OSError:
+        return None
+    alpha = payload[offset::4]
+    return alpha.count(255) == width * height

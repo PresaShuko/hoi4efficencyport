@@ -82,6 +82,18 @@ def _to_pow2(img: Image.Image) -> tuple[Image.Image, bool]:
     return img.resize((pw, ph), Image.Resampling.LANCZOS), True
 
 
+def _is_pow2(n: int) -> bool:
+    return n > 0 and not n & (n - 1)
+
+
+def _needs_resize(w: int, h: int, cap: int | None) -> bool:
+    """True when _fix_one would resize (cap or pow2 floor)."""
+    if cap is not None and max(w, h) > cap:
+        scale = cap / max(w, h)
+        w, h = max(1, int(w * scale)), max(1, int(h * scale))
+    return not (_is_pow2(w) and _is_pow2(h))
+
+
 def _fix_one(path: Path, cap: int | None, cmd: list[str],
              plan: dict | None = None) -> dict:
     rec: dict = {"path": str(path), "action": "", "ok": False}
@@ -92,8 +104,36 @@ def _fix_one(path: Path, cap: int | None, cmd: list[str],
             rec.update({"ok": True, "skipped": True, "note": plan.get("note", "")})
             return rec
         target = path.with_suffix(".dds") if plan["action"] == "convert" else path
+        # Uncompressed DDS that needs no resize: format and mips are decided
+        # from the header/pixels, so texconv can read the DDS directly. Same
+        # pixels, same format choice, no Pillow decode and no PNG round-trip.
+        hdr = dds.read_header(path) if path.suffix.lower() == ".dds" else None
+        opaque = dds.alpha_opaque(path) if hdr is not None else None
+        direct = (
+            hdr is not None and opaque is not None
+            and not _needs_resize(hdr["w"], hdr["h"], cap)
+        )
         with tempfile.TemporaryDirectory() as td:
             tdp = Path(td)
+            if direct:
+                fmt = "DXT1" if opaque else "DXT5"
+                out_dds = tdp / f"{path.stem}.dds"
+                r = convert_to_dds(cmd, path, tdp, fmt, mips=0)
+                if r.returncode != 0 or not out_dds.exists():
+                    raise RuntimeError(f"texconv rc={r.returncode}")
+                shutil.copy2(out_dds, target)
+                rec.update({
+                    "ok": True,
+                    "action": plan["action"],
+                    "why": plan.get("why", ""),
+                    "fmt": fmt,
+                    "mips": (dds.read_header(target) or {}).get("mips"),
+                    "resized_cap": False,
+                    "non_pow2_resized": False,
+                    "before_bytes": size_before,
+                    "after_bytes": target.stat().st_size,
+                })
+                return rec
             try:
                 img = images.load_rgba(path)
             except Exception as e:

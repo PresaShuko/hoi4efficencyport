@@ -23,8 +23,10 @@ jobs:
         run: pip install .
       - name: CLI sanity check
         run: hoi4port --version
-      # NOTE: the functional test suite is private (not in this repository):
-      # run it locally with `python tests/run_all.py`.
+      - name: Functional test suite
+        run: python tests/run_all.py
+      - name: Smoke test
+        run: python tests/smoke.py
 
   build:
     needs: test

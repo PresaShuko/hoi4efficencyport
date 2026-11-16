@@ -1,4 +1,4 @@
-"""F5 — Cutover: rewrites references to .dds, applies dedup and removes the
+"""Cutover: rewrites references to .dds, applies dedup and removes the
 converted originals. Consumes build/asset_plan.json + convert_manifest.json.
 
 Logical order:
@@ -20,8 +20,6 @@ NON_DDS = fsutil.ASSET_EXTS - {".dds"}
 
 # The engine resolves these assets with its own rules: no extension rewrite.
 REWRITE_EXCLUDE = ("gfx/fonts/",)
-# Convention-loaded folders: never dedup/delete (path-based lookup).
-SKIP_DIRS = ("gfx/flags/", "gfx/models/", "gfx/entities/", "gfx/fonts/")
 
 
 def _redirect(mapping: dict[str, str], frm: str, to: str) -> None:
@@ -34,20 +32,18 @@ def _redirect(mapping: dict[str, str], frm: str, to: str) -> None:
 
 def plan_cutover(root: Path, scan_result: dict, plan: dict, conv_ok: set[str],
                  do_dedup: bool = True, do_vanilla_dedup: bool = True):
-    skip_prefixes = SKIP_DIRS
-    ref_by_token = {r["token"]: r for r in scan_result["references"]}
-    ref_by_lower_lists: dict[str, list[dict]] = defaultdict(list)
-    for r in scan_result["references"]:
-        ref_by_lower_lists[r["token"].lower()].append(r)
+    ref_by_token = scanner.index_by_token(scan_result)
+    ref_by_lower = scanner.index_by_token_lower(scan_result)
+    refn_by_lower = {
+        token: sum(len(r["files"]) for r in refs)
+        for token, refs in ref_by_lower.items()
+    }
 
     def locs_for(t: str) -> list[str]:
-        out: list[str] = []
-        for r in ref_by_lower_lists.get(t.lower(), []):
-            out += r["files"]
-        return out
+        return [loc for r in ref_by_lower.get(t.lower(), ()) for loc in r["files"]]
 
     def refn(t: str) -> int:
-        return len(locs_for(t))
+        return refn_by_lower.get(t.lower(), 0)
 
     mapping: dict[str, str] = {}
     for token, r in ref_by_token.items():
@@ -66,21 +62,22 @@ def plan_cutover(root: Path, scan_result: dict, plan: dict, conv_ok: set[str],
         for paths in plan["duplicates"].values():
             # never dedup convention-loaded folders (flags/models/entities/fonts):
             # the engine resolves them by path, without textual references
-            existing = [
+            existing: list[str] = [
                 p for p in paths
-                if (root / p).exists() and not p.lower().startswith(skip_prefixes)
+                if (root / p).exists()
+                and not p.lower().startswith(scanner.CONVENTION_DIRS)
             ]
             if len(existing) < 2:
                 continue
-            canonical = max(
+            canonical: str = max(
                 existing,
                 key=lambda p: (p.lower().endswith(".dds"), refn(p), p),
             )
             for p in existing:
                 if p == canonical:
                     continue
-                cur = mapping.get(p, p)
-                canon_cur = mapping.get(canonical, canonical)
+                cur: str = mapping.get(p, p)
+                canon_cur: str = mapping.get(canonical, canonical)
                 if refn(p) or cur != p and refn(cur):
                     _redirect(mapping, cur, canon_cur)
                 deletions.add(p)
@@ -101,7 +98,7 @@ def plan_cutover(root: Path, scan_result: dict, plan: dict, conv_ok: set[str],
         deletions |= {
             p for p in plan.get("vanilla_identical", [])
             if (root / p).exists()
-            and not p.lower().startswith(skip_prefixes)
+            and not p.lower().startswith(scanner.CONVENTION_DIRS)
         }
     # Extension-substitution guard: the engine resolves a token with an
     # extension different from the file on disk (e.g. script says .png, only
@@ -146,7 +143,7 @@ def plan_cutover(root: Path, scan_result: dict, plan: dict, conv_ok: set[str],
     return changes, sorted(deletions), dedup_applied, kept_ext_guard
 
 
-def run(root: Path, workshop: Path | None, out: Path, apply: bool, vanilla: Path | None,
+def run(root: Path, out: Path, apply: bool, vanilla: Path | None,
         do_dedup: bool = True, do_vanilla_dedup: bool = True) -> int:
     out.mkdir(parents=True, exist_ok=True)
     plan_file = out / "asset_plan.json"
@@ -195,7 +192,7 @@ def run(root: Path, workshop: Path | None, out: Path, apply: bool, vanilla: Path
         print(f"Deleted: {removed} files")
 
         post = scanner.scan(root, vanilla)
-        by_token = {r["token"]: r for r in post["references"]}
+        by_token = scanner.index_by_token(post)
         broken = [
             d for d in deletions
             if d in by_token and not by_token[d]["in_vanilla"]
@@ -208,7 +205,6 @@ def run(root: Path, workshop: Path | None, out: Path, apply: bool, vanilla: Path
         print(f"Verify: true missing: {len(post['missing_true'])} — "
               f"deleted but still referenced: {len(broken)}")
 
-    (out / "cutover_manifest.json").write_text(
-        json.dumps(result, indent=1, ensure_ascii=False), encoding="utf-8")
+    fsutil.write_json(out / "cutover_manifest.json", result)
     print(f"Manifest: {out / 'cutover_manifest.json'}")
     return 0

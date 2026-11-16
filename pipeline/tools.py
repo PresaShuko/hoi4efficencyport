@@ -1,5 +1,5 @@
-"""Resolution of the external texconv tool — one place, no hardcoded paths
-in calling code.
+"""Resolution and invocation of the external texconv tool — one place, no
+hardcoded paths in calling code.
 
 Resolution order:
 1. the ``HOI4PORT_TEXCONV`` environment variable (explicit exe path);
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -65,3 +66,23 @@ def texconv_command(no_wine: bool = False) -> list[str]:
     if wine:
         return [wine, str(exe)]
     return [str(exe)]
+
+
+# --- invocation (shared by convert and texfix) ---------------------------------
+
+def invoke(cmd: list[str], args: list[str]) -> subprocess.CompletedProcess:
+    return subprocess.run([*cmd, *args], capture_output=True, text=True,
+                          errors="replace")
+
+
+def convert_to_dds(cmd: list[str], src: Path, out_dir: Path, fmt: str,
+                   mips: int) -> subprocess.CompletedProcess:
+    """Compress ``src`` to ``fmt`` with ``mips`` (0 = full mip chain)."""
+    return invoke(cmd, ["-nologo", "-f", fmt, "-m", str(mips), "-y", "-dx9",
+                        "-o", str(out_dir), str(src)])
+
+
+def decode_to_png(cmd: list[str], src: Path, out_dir: Path) -> subprocess.CompletedProcess:
+    """Decode a format Pillow cannot read (e.g. BC7) to PNG."""
+    return invoke(cmd, ["-nologo", "-ft", "png", "-y", "-dx9",
+                        "-o", str(out_dir), str(src)])

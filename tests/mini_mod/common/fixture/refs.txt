@@ -1,0 +1,2 @@
+# Fixture minima per lo smoke test: un riferimento asset lecito.
+fixture_reference = "gfx/fixture/test.dds"

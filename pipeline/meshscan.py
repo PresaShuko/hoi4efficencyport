@@ -1,23 +1,28 @@
-"""F7 — Meshscan: automatic analysis of Clausewitz .mesh files (geometry, materials,
+"""Meshscan: automatic analysis of Clausewitz .mesh files (geometry, materials,
 collision, bones) with an adaptive baseline on the installed vanilla.
 
-The parser is streaming: it reads the header and structure (objects/properties)
-and skips the numeric payloads, so it costs O(bytes) without ever materializing
-the geometry. Format verified on game files: header b'@@b@', objects `[name\\0`,
-properties `!`+len+name+type(i/f/s)+count+payload; meshes expose `p` (positions,
-3/vertex), `tri` (indices, 3/triangle), `u0`, `n`, `ta`, and the materials
-`shader`/`diff`/`n`/`spec` as strings.
+The file is read once into memory (size = the .mesh itself); the parser walks
+only the structure (objects/properties) and skips the numeric payloads, so it
+never materializes the geometry. Format verified on game files: header
+b'@@b@', objects `[name\\0`, properties `!`+len+name+type(i/f/s)+count+payload;
+meshes expose `p` (positions, 3/vertex), `tri` (indices, 3/triangle), `u0`,
+`n`, `ta`, and the materials `shader`/`diff`/`n`/`spec` as strings.
 """
 from __future__ import annotations
 
 import json
 import struct
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from . import fsutil
 
 MESH_CLASSES_FALLBACK = "other"
+
+_BRACKET = ord("[")
+_BANG = ord("!")
+_TYPE_STRING = ord("s")
+_TYPE_NUMERIC = (ord("i"), ord("f"))
 
 
 def expected_mips(w: int, h: int) -> int:
@@ -32,14 +37,15 @@ def _parse_mesh(path: Path) -> dict:
     if data[:4] != b"@@b@":
         raise ValueError(f"unrecognized mesh header: {path}")
     pos = 4
+    size = len(data)
     submeshes: list[dict] = []
     cur_mesh: dict | None = None
     cur_obj = ""
-    while pos < len(data):
-        c = data[pos:pos + 1]
-        if c == b"[":
+    while pos < size:
+        marker = data[pos]
+        if marker == _BRACKET:
             pos += 1
-            while data[pos:pos + 1] == b"[":
+            while pos < size and data[pos] == _BRACKET:
                 pos += 1
             end = data.index(b"\0", pos)
             cur_obj = data[pos:end].decode("latin-1")
@@ -48,45 +54,45 @@ def _parse_mesh(path: Path) -> dict:
                 cur_mesh = {"shader": "", "verts": 0, "tris": 0,
                             "diff": "", "n": "", "spec": "", "collision": False}
                 submeshes.append(cur_mesh)
-        elif c == b"!":
+        elif marker == _BANG:
             pos += 1
-            ln = data[pos]
+            name_len = data[pos]
             pos += 1
-            name = data[pos:pos + ln].decode("latin-1")
-            pos += ln
-            t = data[pos:pos + 1].decode("ascii")
+            name = data[pos:pos + name_len].decode("latin-1")
+            pos += name_len
+            typ = data[pos]
             pos += 1
             (cnt,) = struct.unpack_from("<i", data, pos)
             pos += 4
-            if t == "s":
-                (sl,) = struct.unpack_from("<i", data, pos)
-                val = data[pos + 4:pos + 4 + sl].decode("latin-1").rstrip("\x00")
-                pos += 4 + sl
+            if typ == _TYPE_STRING:
+                (str_len,) = struct.unpack_from("<i", data, pos)
+                val = data[pos + 4:pos + 4 + str_len].decode("latin-1").rstrip("\x00")
+                pos += 4 + str_len
                 if cur_obj == "material" and cur_mesh is not None:
                     if name == "shader":
                         cur_mesh["shader"] = val
                         cur_mesh["collision"] = val.lower().startswith("collision")
                     elif name in ("diff", "n", "spec"):
                         cur_mesh[name] = val
-            elif t in ("i", "f"):
-                if cur_obj == "mesh" and cur_mesh is not None:
-                    if name == "p":
+            elif typ in _TYPE_NUMERIC:
+                if cur_mesh is not None:
+                    if cur_obj == "mesh" and name == "p":
                         cur_mesh["verts"] += cnt // 3
-                    elif name == "tri":
+                    elif cur_obj == "mesh" and name == "tri":
                         cur_mesh["tris"] += cnt // 3
-                elif cur_obj == "skin" and name == "bones" and cnt > 0:
-                    if cur_mesh is not None:
+                    elif cur_obj == "skin" and name == "bones" and cnt > 0:
                         cur_mesh["bones"] = struct.unpack_from("<i", data, pos)[0]
                 pos += 4 * cnt
             else:
-                raise ValueError(f"unknown property type {t!r} in {path}")
+                raise ValueError(
+                    f"unknown property type {chr(typ)!r} in {path}")
         else:
-            raise ValueError(f"unexpected byte {c!r} at {pos} in {path}")
+            raise ValueError(f"unexpected byte {marker!r} at {pos} in {path}")
     for m in submeshes:
         m.setdefault("bones", 0)
     return {
         "path": "",  # filled in by the caller (relative to the root)
-        "bytes": len(data),
+        "bytes": size,
         "verts": sum(m["verts"] for m in submeshes),
         "tris": sum(m["tris"] for m in submeshes),
         "submeshes": len(submeshes),
@@ -111,14 +117,14 @@ def scan_dir(root: Path) -> list[dict]:
     if not gfx.is_dir():
         return out
     for p in sorted(gfx.rglob("*.mesh")):
+        rel = p.relative_to(root).as_posix()
         try:
             rec = _parse_mesh(p)
-            rec["path"] = p.relative_to(root).as_posix().replace("\\", "/")
-            rec["class"] = mesh_class(rec["path"])
+            rec["path"] = rel
+            rec["class"] = mesh_class(rel)
             rec["ok"] = True
         except Exception as e:  # corrupt file: recorded, does not block the scan
-            rec = {"path": p.relative_to(root).as_posix().replace("\\", "/"),
-                   "ok": False, "note": repr(e)}
+            rec = {"path": rel, "ok": False, "note": repr(e)}
         out.append(rec)
     return out
 
@@ -136,29 +142,49 @@ def class_medians(stats: list[dict]) -> dict[str, int]:
     return med
 
 
+def summary(stats: list[dict]) -> dict:
+    """Counts and record buckets used by both the report and the CLI output."""
+    ok = [r for r in stats if r.get("ok")]
+    return {
+        "ok": ok,
+        "ko": [r for r in stats if not r.get("ok")],
+        "verts": sum(r["verts"] for r in ok),
+        "tris": sum(r["tris"] for r in ok),
+        "multi_material": sum(1 for r in ok if r["materials"] >= 2),
+        "with_collision": sum(1 for r in ok if r["collision_verts"] > 0),
+    }
+
+
 def vanilla_baseline(vanilla: Path, cache: Path) -> dict:
-    """Vanilla mesh baseline, computed once and cached (vanilla_hash.json
-    pattern). Returns {class_median: {...}, files: n}."""
+    """Vanilla mesh baseline, computed once and cached. The cache carries the
+    install stamp so a game update invalidates it."""
+    stamp = fsutil.install_stamp(vanilla)
     if cache.exists():
-        return json.loads(cache.read_text(encoding="utf-8"))
+        try:
+            cached = json.loads(cache.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            cached = None
+        if isinstance(cached, dict) and cached.get("stamp") == stamp:
+            return cached
     stats = scan_dir(vanilla)
-    result = {"class_median": class_medians(stats), "files": len(stats)}
+    result = {"stamp": stamp, "class_median": class_medians(stats),
+              "files": len(stats)}
     cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_text(json.dumps(result, indent=1), encoding="utf-8")
+    fsutil.write_json(cache, result)
     return result
 
 
 def write_report(stats: list[dict], baseline: dict | None, out_file: Path) -> None:
-    ok = [r for r in stats if r.get("ok")]
-    ko = [r for r in stats if not r.get("ok")]
+    s = summary(stats)
+    ok, ko = s["ok"], s["ko"]
     med = (baseline or {}).get("class_median", {})
-    ts = datetime.now().isoformat(timespec="seconds")
+    ts = datetime.now(UTC).isoformat(timespec="seconds")
     lines = [
         f"Meshscan {ts}",
         f"Meshes: {len(ok)} ok, {len(ko)} errors — total vertices: "
-        f"{sum(r['verts'] for r in ok):,} — triangles: {sum(r['tris'] for r in ok):,}",
-        f"Multi-material (≥2 draw calls): {sum(1 for r in ok if r['materials'] >= 2)}"
-        f" — with mesh collision: {sum(1 for r in ok if r['collision_verts'] > 0)}",
+        f"{s['verts']:,} — triangles: {s['tris']:,}",
+        f"Multi-material (≥2 draw calls): {s['multi_material']}"
+        f" — with mesh collision: {s['with_collision']}",
     ]
     if med:
         lines.append("Vanilla baseline (median vertices per class): "
@@ -190,8 +216,7 @@ def run(root: Path, out: Path, vanilla: Path | None, skip_vanilla: bool) -> int:
     out.mkdir(parents=True, exist_ok=True)
     print(f"Meshscan of {root} …")
     stats = scan_dir(root)
-    (out / "mesh_stats.json").write_text(
-        json.dumps(stats, indent=1, ensure_ascii=False), encoding="utf-8")
+    fsutil.write_json(out / "mesh_stats.json", stats)
     baseline = None
     if vanilla and not skip_vanilla and (vanilla / "gfx").is_dir():
         baseline = vanilla_baseline(vanilla, out / "vanilla_mesh_stats.json")
@@ -202,8 +227,8 @@ def run(root: Path, out: Path, vanilla: Path | None, skip_vanilla: bool) -> int:
     else:
         print("Note: vanilla not available — no per-class comparison.")
     write_report(stats, baseline, out / "mesh_report.txt")
-    ok = [r for r in stats if r.get("ok")]
-    print(f"Meshes: {len(ok)} ok, {len(stats) - len(ok)} errors — "
-          f"vertices: {sum(r['verts'] for r in ok):,}")
+    s = summary(stats)
+    print(f"Meshes: {len(s['ok'])} ok, {len(s['ko'])} errors — "
+          f"vertices: {s['verts']:,}")
     print(f"Output: {out / 'mesh_stats.json'} + mesh_report.txt")
     return 0

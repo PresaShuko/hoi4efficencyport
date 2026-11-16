@@ -1,5 +1,51 @@
 # Changelog
 
+## 1.1.0 — 2026-11-16
+
+Internal cleanup release: no pipeline behaviour change, but three
+compatibility notes.
+
+- **Breaking**: `sync` no longer accepts `--out` (it never used it; the flag
+  was silently ignored). Every other command is unchanged.
+- **Breaking**: `vanilla_hash.json` and `vanilla_mesh_stats.json` now carry a
+  `stamp` (content hash of the install's `launcher-settings.json`) and the
+  vanilla hashes live under `hashes`. Old files are detected: `analyze`
+  prints a note and skips vanilla dedup until the next full `scan`; baselines
+  are recomputed automatically. A game update now invalidates the cache
+  instead of leaving stale hashes/medians behind.
+- Removed the unused `cutover.run(..., workshop)` parameter and the dead
+  parse field `start`.
+
+Cleanup:
+
+- One DDS header reader (`pipeline/dds.py`) and one Pillow helper module
+  (`pipeline/images.py`) replace three header parsers, two `alpha_kind`
+  copies and two padding implementations.
+- One thread-pool runner (`pipeline/parallel.py`) and one texconv invocation
+  layer (`tools.convert_to_dds`/`decode_to_png`) replace the duplicated
+  convert/texfix loops.
+- One scan-index API (`scanner.index_by_token`, `index_by_token_lower`,
+  `sprites_by_texture`) and one convention-folder constant replace four
+  copied index builders and five policy tuples.
+- Counts for the reports and the CLI come from a single `summary()` per
+  module (scan, analyze, meshscan) instead of being recomputed in two places.
+- `config`: at most one `hoi4port.toml` read per command (was up to four).
+- `texfix` uses the plan it already computed (no second header read per
+  texture); `scan` parses each quoted line once (the regex ran twice).
+- `analyze` reads each texture once for both the Pillow decode and the
+  dedup hash; `meshscan` no longer copies one `bytes` object per parsed
+  token and its docstring no longer claims streaming.
+- Dead code removed: unused constants/imports, unreachable branches,
+  duplicated `events/` classification rule, `if not base` guard, no-op
+  `.replace("\\", "/")` after `as_posix()`, no-op `direct if ... else`
+  ternary, local imports.
+- `--help` now documents all 11 commands (it listed 2).
+- Test harness: shared `make_scan`, `TEXCONV`/`CMD`, `clean_env`;
+  `run_all.py -k <substring>` implemented as documented; tautological
+  mip test removed.
+- The functional suite (`tests/`) is now tracked in git and executed by CI
+  (`run_all.py` + `smoke.py`) instead of being ignored via `.git/info/exclude`.
+
 ## 1.0.1 — 2026-10-03
 
 Bug-fix release from the first exhaustive test session (suite: 206 tests,

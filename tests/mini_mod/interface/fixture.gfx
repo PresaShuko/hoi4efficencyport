@@ -1,0 +1,6 @@
+spriteTypes = {
+	spriteType = {
+		name = "GFX_fixture_test"
+		texturefile = "gfx/fixture/test.dds"
+	}
+}

@@ -1,16 +1,19 @@
-"""FS utilities: encoding-aware reading, staging sync via robocopy, hashing."""
+"""FS utilities: encoding-aware I/O, JSON, file iteration, hashing, staging sync."""
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 import subprocess
+from collections.abc import Iterable, Iterator
 from pathlib import Path
+from typing import Any
 
 # Paradox: UTF-8 (sometimes with BOM) or Windows-1252; latin-1 as a safety net.
 TEXT_EXTS = {".txt", ".lua", ".gfx", ".gui"}
 ASSET_EXTS = {".png", ".tga", ".dds", ".jpg", ".jpeg", ".bmp"}
 
-_ROBOCOPY_OK = set(range(0, 8))  # 0-7 = success (1 = files copied, etc.)
+_ROBOCOPY_OK = range(8)  # 0-7 = success (1 = files copied, etc.)
 
 
 def read_text(path: Path) -> tuple[str, str]:
@@ -27,23 +30,33 @@ def read_text(path: Path) -> tuple[str, str]:
             return raw.decode(enc), enc
         except UnicodeDecodeError:
             continue
-    raise UnicodeDecodeError("utf-8", raw, 0, 1, f"no valid encoding: {path}")
+    # latin-1 maps every byte, so the loop above always returns.
+    raise AssertionError(f"no Latin-1 fallback for {path}")
 
 
 def write_text(path: Path, text: str, encoding: str) -> None:
     path.write_text(text, encoding=encoding, newline="")
 
 
-def iter_text_files(root: Path):
+def write_json(path: Path, data: Any, indent: int = 1) -> None:
+    path.write_text(json.dumps(data, indent=indent, ensure_ascii=False),
+                    encoding="utf-8")
+
+
+def iter_files(root: Path, exts: Iterable[str]) -> Iterator[Path]:
+    """Files under ``root`` whose suffix is in ``exts`` (case-insensitive)."""
+    wanted = {e.lower() for e in exts}
     for p in root.rglob("*"):
-        if p.is_file() and p.suffix.lower() in TEXT_EXTS:
+        if p.is_file() and p.suffix.lower() in wanted:
             yield p
 
 
-def iter_asset_files(root: Path):
-    for p in root.rglob("*"):
-        if p.is_file() and p.suffix.lower() in ASSET_EXTS:
-            yield p
+def iter_text_files(root: Path) -> Iterator[Path]:
+    yield from iter_files(root, TEXT_EXTS)
+
+
+def iter_asset_files(root: Path) -> Iterator[Path]:
+    yield from iter_files(root, ASSET_EXTS)
 
 
 def sha256_file(path: Path) -> str:
@@ -52,6 +65,19 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def install_stamp(root: Path) -> str:
+    """Cache key of a game install: content hash of ``launcher-settings.json``.
+
+    Steam rewrites that file on every game update, so a stale baseline is
+    detected; hashing the content also survives copies of the install.
+    """
+    try:
+        return hashlib.sha256((root / "launcher-settings.json").read_bytes()
+                              ).hexdigest()[:16]
+    except OSError:
+        return "unknown"
 
 
 def sync_staging(src: Path, dst: Path) -> None:

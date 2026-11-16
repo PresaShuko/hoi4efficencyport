@@ -1,4 +1,5 @@
-"""Single scanner: replaces trova_path_tutto.py, trovaPercorsiFileLogica.py and trovaPath.py.
+"""Single scanner for mod text files: asset references, spriteType definitions
+and GFX_* usage across a mod tree.
 
 Collects from every text file in the mod:
 - asset path references (quoted) with verified existence
@@ -9,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from . import fsutil
@@ -21,13 +22,24 @@ SPRITE_BLOCK_RE = re.compile(
     r"\b(?:corneredTileSpriteType|spriteType)\s*=\s*\{([^{}]*)\}", re.S | re.I
 )
 NAME_RE = re.compile(r'\bname\s*=\s*"([^"]+)"')
+TEXTUREFILE_RE = re.compile(r'texturefile\s*=\s*"([^"]+)"', re.I)
 NOFRAMES_RE = re.compile(r"\bnoOfFrames\s*=\s*(\d+)", re.I)
+
+# Folders the engine resolves by path convention (flags, models, entities,
+# fonts): never reclassified, deduped or deleted by the pipeline.
+CONVENTION_DIRS = ("gfx/flags/", "gfx/models/", "gfx/entities/", "gfx/fonts/")
+# Convention folders outside the 2D texture analysis/conversion.
+TEXTURE_SKIP_DIRS = ("gfx/models/", "gfx/entities/", "gfx/flags/")
+
+
+def _has_asset_ext(token: str) -> bool:
+    return Path(token).suffix.lower() in fsutil.ASSET_EXTS
 
 
 def _looks_like_path(token: str) -> bool:
     if "/" in token or "\\" in token:
         return True
-    return Path(token).suffix.lower() in fsutil.ASSET_EXTS
+    return _has_asset_ext(token)
 
 
 def _resolve(root: Path, token: str) -> Path:
@@ -55,6 +67,23 @@ def strip_comments(text: str) -> str:
     return "\n".join(out)
 
 
+def sprite_defs_in_text(text: str) -> dict[str, dict]:
+    """name → {texturefile, noOfFrames} for every spriteType block in ``text``."""
+    defs: dict[str, dict] = {}
+    for m in SPRITE_BLOCK_RE.finditer(text):
+        body = m.group(1)
+        nm = NAME_RE.search(body)
+        if not nm:
+            continue
+        tf = TEXTUREFILE_RE.search(body)
+        nf = NOFRAMES_RE.search(body)
+        defs[nm.group(1)] = {
+            "texturefile": _norm(tf.group(1)) if tf else None,
+            "noOfFrames": int(nf.group(1)) if nf else None,
+        }
+    return defs
+
+
 def sprite_defs(root: Path, subdirs=("interface", "gfx")) -> set[str]:
     """spriteType names defined in the .gfx files of a tree (mod or vanilla)."""
     names: set[str] = set()
@@ -67,16 +96,13 @@ def sprite_defs(root: Path, subdirs=("interface", "gfx")) -> set[str]:
                 text, _ = fsutil.read_text(fp)
             except (UnicodeDecodeError, OSError):
                 continue
-            for m in SPRITE_BLOCK_RE.finditer(strip_comments(text)):
-                nm = NAME_RE.search(m.group(1))
-                if nm:
-                    names.add(nm.group(1))
+            names.update(sprite_defs_in_text(strip_comments(text)))
     return names
 
 
 def scan(root: Path, vanilla: Path | None = None) -> dict:
     references: dict[str, dict] = {}   # normalized token -> record
-    gfx_refs: dict[str, list[str]] = {}  # sprite name -> ["file:line", ...]
+    gfx_refs: dict[str, dict] = {}     # sprite name -> {quoted: [...], bare: [...]}
     sprite_types: dict[str, dict] = {}   # name -> {texturefile, noOfFrames, file}
     enc_stats: Counter[str] = Counter()
     unreadable: list[str] = []
@@ -99,58 +125,51 @@ def scan(root: Path, vanilla: Path | None = None) -> dict:
             # spriteType blocks span multiple lines: match on the whole text.
             # Names defined here are recorded and excluded from gfx_refs
             # below: a definition is not a usage (BUG-06).
-            for m in SPRITE_BLOCK_RE.finditer(text):
-                body = m.group(1)
-                nm = NAME_RE.search(body)
-                if not nm:
-                    continue
-                tf = re.search(r'texturefile\s*=\s*"([^"]+)"', body, re.I)
-                nf = NOFRAMES_RE.search(body)
-                sprite_types[nm.group(1)] = {
-                    "texturefile": _norm(tf.group(1)) if tf else None,
-                    "noOfFrames": int(nf.group(1)) if nf else None,
-                    "file": rel,
-                }
-                local_defs.add(nm.group(1))
+            for name, meta in sprite_defs_in_text(text).items():
+                sprite_types[name] = {**meta, "file": rel}
+                local_defs.add(name)
 
         for lineno, line in enumerate(text.splitlines(), 1):
-            for m in QUOTED_RE.finditer(line):
-                token = m.group(1)
-                if _looks_like_path(token):
-                    key = _norm(token)
-                    ref = references.setdefault(
-                        key,
-                        {
-                            "token": key,
-                            "files": [],
-                            "exists": None,
-                            "in_vanilla": False,
-                            "suspect": bool(SUSPECT_RE.search(key)),
-                        },
-                    )
-                    ref["files"].append(f"{rel}:{lineno}")
-                    if ref["exists"] is None:
-                        # PDX resolves paths from the mod root; entity .gfx files
-                        # also use paths relative to their own folder.
-                        ref["exists"] = (
-                            _resolve(root, token).exists()
-                            or (fp.parent / token).exists()
-                        )
-                        if (
-                            not ref["exists"]
-                            and vanilla is not None
-                            and not Path(token).is_absolute()
-                        ):
-                            ref["in_vanilla"] = (vanilla / token).exists()
-            quoted_spans = [m.span() for m in QUOTED_RE.finditer(line)]
+            # One pass for the quoted tokens; the spans are reused by the
+            # GFX_* classification below (quoted vs bare).
+            quoted = [(m.group(1), m.span()) for m in QUOTED_RE.finditer(line)]
+            for token, _ in quoted:
+                if not _looks_like_path(token):
+                    continue
+                key = _norm(token)
+                ref = references.setdefault(
+                    key,
+                    {
+                        "token": key,
+                        "files": [],
+                        "exists": None,
+                        "in_vanilla": False,
+                        "suspect": bool(SUSPECT_RE.search(key)),
+                    },
+                )
+                ref["files"].append(f"{rel}:{lineno}")
+                if ref["exists"] is not None:
+                    continue
+                # PDX resolves paths from the mod root; entity .gfx files
+                # also use paths relative to their own folder.
+                ref["exists"] = (
+                    _resolve(root, token).exists()
+                    or (fp.parent / token).exists()
+                )
+                if (
+                    not ref["exists"]
+                    and vanilla is not None
+                    and not Path(token).is_absolute()
+                ):
+                    ref["in_vanilla"] = (vanilla / token).exists()
             for m in GFX_NAME_RE.finditer(line):
                 if m.group(0) in local_defs:
                     continue  # this .gfx file DEFINES it: not a usage (BUG-06)
                 rec = gfx_refs.setdefault(m.group(0), {"quoted": [], "bare": []})
-                s, e = m.span()
+                start, end = m.span()
                 bucket = (
                     "quoted"
-                    if any(s >= qs and e <= qe for qs, qe in quoted_spans)
+                    if any(qs <= start and end <= qe for _, (qs, qe) in quoted)
                     else "bare"
                 )
                 rec[bucket].append(f"{rel}:{lineno}")
@@ -162,11 +181,8 @@ def scan(root: Path, vanilla: Path | None = None) -> dict:
     gfx_missing = sorted(referenced_names - defined - vanilla_sprites)
     gfx_covered_vanilla = sorted((referenced_names & vanilla_sprites) - defined)
 
-    def _has_asset_ext(tok: str) -> bool:
-        return Path(tok).suffix.lower() in fsutil.ASSET_EXTS
-
     return {
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "root": str(root),
         "files_by_encoding": dict(enc_stats),
         "unreadable": unreadable,
@@ -199,52 +215,80 @@ def scan(root: Path, vanilla: Path | None = None) -> dict:
     }
 
 
-def vanilla_baseline(vanilla: Path | None, out_file: Path, skip: bool) -> str:
-    """SHA256 of every vanilla asset (gfx/ + map/) for F3-phase dedup."""
-    if skip or vanilla is None or not vanilla.is_dir():
-        return "skipped"
-    if out_file.exists():
-        return "cached"
-    hashes: dict[str, str] = {}
-    for sub in ("gfx", "map"):
-        base = vanilla / sub
-        if not base.is_dir():
-            continue
-        for p in fsutil.iter_asset_files(base):
-            hashes[f"{sub}/{p.relative_to(base).as_posix()}"] = fsutil.sha256_file(p)
-    out_file.write_text(json.dumps(hashes, indent=0), encoding="utf-8")
-    return f"{len(hashes)} file"
+# --- indexes over a scan result (shared by normalize/analyze/cutover) -----------
+
+def index_by_token(scan_result: dict) -> dict[str, dict]:
+    return {r["token"]: r for r in scan_result["references"]}
+
+
+def index_by_token_lower(scan_result: dict) -> dict[str, list[dict]]:
+    """token.lower() → every reference with that exact (normalized) spelling."""
+    index: dict[str, list[dict]] = {}
+    for r in scan_result["references"]:
+        index.setdefault(r["token"].lower(), []).append(r)
+    return index
+
+
+def sprites_by_texture(scan_result: dict) -> dict[str, list[str]]:
+    """texturefile.lower() → sprite names defined with that texture."""
+    index: dict[str, list[str]] = {}
+    for name, sprite in scan_result["sprite_types"].items():
+        tex = sprite.get("texturefile")
+        if tex:
+            index.setdefault(tex.lower(), []).append(name)
+    return index
+
+
+# --- reporting -----------------------------------------------------------------
+
+def summary(result: dict) -> dict:
+    """Counts used by both the report file and the CLI output."""
+    refs = result["references"]
+    missing = [r for r in refs if not r["exists"]]
+    return {
+        "text_files": sum(result["files_by_encoding"].values()),
+        "encodings": result["files_by_encoding"],
+        "references": len(refs),
+        "existing": len(refs) - len(missing),
+        "missing": missing,
+        "missing_count": len(missing),
+        "fallback_vanilla": len(result["missing_fallback_vanilla"]),
+        "missing_true": len(result["missing_true"]),
+        "missing_noise": len(result["missing_noise"]),
+        "missing_suspect": len(result["missing_suspect"]),
+        "sprite_types": len(result["sprite_types"]),
+        "gfx_vanilla_defs": result["gfx_vanilla_defs_count"],
+        "gfx_refs": len(result["gfx_refs"]),
+        "gfx_missing": len(result["gfx_missing"]),
+        "gfx_missing_static": len(result["gfx_missing_static"]),
+        "gfx_covered_vanilla": len(result["gfx_covered_by_vanilla"]),
+        "gfx_unused": len(result["gfx_unused_defs"]),
+        "unreadable": len(result["unreadable"]),
+    }
 
 
 def write_report(result: dict, out_file: Path) -> None:
-    refs = result["references"]
-    missing = [r for r in refs if not r["exists"]]
-    fallback = len(result["missing_fallback_vanilla"])
-    true_miss = len(result["missing_true"])
-    suspect = len(result["missing_suspect"])
-    gfx_missing_static = len(result["gfx_missing_static"])
+    s = summary(result)
     lines = [
         f"Scan {result['generated_at']} — root: {result['root']}",
-        f"Text files: {sum(result['files_by_encoding'].values())} "
-        f"(encodings: {result['files_by_encoding']})",
-        f"Referenced asset paths (unique): {len(refs)}",
-        f"  ├─ existing in mod: {len(refs) - len(missing)}",
-        f"  ├─ vanilla fallback (legit, don't touch): {fallback}",
-        f"  ├─ suspects (non-paths, ignore): {suspect}",
-        f"  ├─ TRUE missing: {true_miss}",
-        f"  └─ noise (quotes without extension): {len(result['missing_noise'])}",
-        f"spriteType defined (mod): {len(result['sprite_types'])} "
-        f"+ vanilla: {result['gfx_vanilla_defs_count']}",
-        f"Referenced GFX_*: {len(result['gfx_refs'])}",
-        f"  ├─ missing covered by vanilla: {len(result['gfx_covered_by_vanilla'])}",
-        f"  ├─ missing with static consumption (quoted): {gfx_missing_static}",
-        f"  └─ missing dynamic-only (bare): {len(result['gfx_missing']) - gfx_missing_static}",
-        f"spriteType never used: {len(result['gfx_unused_defs'])}",
+        f"Text files: {s['text_files']} (encodings: {s['encodings']})",
+        f"Referenced asset paths (unique): {s['references']}",
+        f"  ├─ existing in mod: {s['existing']}",
+        f"  ├─ vanilla fallback (legit, don't touch): {s['fallback_vanilla']}",
+        f"  ├─ suspects (non-paths, ignore): {s['missing_suspect']}",
+        f"  ├─ TRUE missing: {s['missing_true']}",
+        f"  └─ noise (quotes without extension): {s['missing_noise']}",
+        f"spriteType defined (mod): {s['sprite_types']} + vanilla: {s['gfx_vanilla_defs']}",
+        f"Referenced GFX_*: {s['gfx_refs']}",
+        f"  ├─ missing covered by vanilla: {s['gfx_covered_vanilla']}",
+        f"  ├─ missing with static consumption (quoted): {s['gfx_missing_static']}",
+        f"  └─ missing dynamic-only (bare): {s['gfx_missing'] - s['gfx_missing_static']}",
+        f"spriteType never used: {s['gfx_unused']}",
     ]
     true_list = result["missing_true"]
     if true_list:
         lines.append("\n--- True missing (first 50) ---")
-        by_token = {r["token"]: r for r in missing}
+        by_token = {r["token"]: r for r in s["missing"]}
         lines += [
             f"  {t}  (from {by_token[t]['files'][0]})"
             for t in true_list[:50]
@@ -258,3 +302,30 @@ def write_report(result: dict, out_file: Path) -> None:
             loc = result["gfx_refs"][n]["quoted"][0]
             lines.append(f"  {n}  (from {loc})")
     out_file.write_text("\n".join(lines), encoding="utf-8")
+
+
+def vanilla_baseline(vanilla: Path | None, out_file: Path, skip: bool) -> str:
+    """SHA256 of every vanilla asset (gfx/ + map/) for F3-phase dedup.
+
+    The cache carries the install stamp: after a game update the hashes are
+    recomputed instead of being trusted blindly.
+    """
+    if skip or vanilla is None or not vanilla.is_dir():
+        return "skipped"
+    stamp = fsutil.install_stamp(vanilla)
+    if out_file.exists():
+        try:
+            cached = json.loads(out_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            cached = None
+        if isinstance(cached, dict) and cached.get("stamp") == stamp:
+            return "cached"
+    hashes: dict[str, str] = {}
+    for sub in ("gfx", "map"):
+        base = vanilla / sub
+        if not base.is_dir():
+            continue
+        for p in fsutil.iter_asset_files(base):
+            hashes[f"{sub}/{p.relative_to(base).as_posix()}"] = fsutil.sha256_file(p)
+    fsutil.write_json(out_file, {"stamp": stamp, "hashes": hashes}, indent=0)
+    return f"{len(hashes)} file"

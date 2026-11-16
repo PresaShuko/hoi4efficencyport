@@ -1,22 +1,20 @@
-"""F3 — Asset analysis: alpha, in-use size (from .gui), hash dedup, unused.
+"""Asset analysis: alpha kind, resolution cap, hash dedup, unused files.
 
 Produces build/asset_plan.json (consumed by convert/cutover) + asset_report.txt.
-Conservative policy: no changes to the mod here, planning only.
+Conservative policy: planning only, no changes to the mod.
 """
 from __future__ import annotations
 
-import json
-from collections import Counter, defaultdict, deque
-from datetime import datetime, timezone
-from pathlib import Path
+import hashlib
+import io
 import re
+from collections import Counter, defaultdict, deque
+from datetime import UTC, datetime
+from pathlib import Path
 
 from PIL import Image
 
-from . import fsutil
-
-# gfx subfolders outside the conversion perimeter (hardcoded position/function).
-SKIP_SUBDIRS = ("gfx/models/", "gfx/entities/", "gfx/flags/")
+from . import dds, fsutil, images, scanner
 
 # Resolution cap per class (max side), ~2x the display size.
 CLASS_CAPS = {
@@ -38,7 +36,7 @@ GFX_QUOTED_RE = re.compile(r'"(GFX_[A-Za-z0-9_]+)"')
 
 def classify(rel: str) -> str:
     r = rel.lower()
-    if r.startswith(SKIP_SUBDIRS):
+    if r.startswith(scanner.TEXTURE_SKIP_DIRS):
         return "skip"
     if r.startswith("gfx/interface/goals/"):
         return "goals"
@@ -92,44 +90,19 @@ def gui_sprite_sizes(root: Path) -> dict[str, tuple[int, int]]:
     return sizes
 
 
-def alpha_kind(img: Image.Image) -> str:
-    if img.mode not in ("RGBA", "LA", "PA"):
-        return "opaque"
-    a = img.getchannel("A")
-    lo, hi = a.getextrema()
-    if lo == 255:
-        return "opaque"
-    if lo == 0 and hi == 255 and not any(
-        0 < v < 255 for v in a.histogram()[1:255]
-    ):
-        return "binary"
-    return "gradient"
-
-
-def dds_fourcc(path: Path) -> str:
-    with path.open("rb") as f:
-        head = f.read(128)
-    if len(head) < 88 or head[:4] != b"DDS ":
-        return "?"
-    four = head[84:88]
-    return four.decode("ascii", "replace")
-
-
 def plan(root: Path, scan_result: dict, vanilla_hash: dict | None) -> dict:
     ref_count = Counter()
     for r in scan_result["references"]:
         if r["exists"]:
             ref_count[r["token"].lower()] = len(r["files"])
 
-    sprite_tex = {}
-    for name, s in scan_result["sprite_types"].items():
-        if s["texturefile"]:
-            sprite_tex.setdefault(s["texturefile"].lower(), []).append(name)
+    sprite_tex = scanner.sprites_by_texture(scan_result)
     gui_sizes = gui_sprite_sizes(root)
 
     files: list[dict] = []
     hash_groups: dict[str, list[str]] = defaultdict(list)
     errors: list[str] = []
+    size_by_path: dict[str, int] = {}
 
     for fp in sorted(fsutil.iter_asset_files(root / "gfx")):
         rel = fp.relative_to(root).as_posix()
@@ -140,17 +113,28 @@ def plan(root: Path, scan_result: dict, vanilla_hash: dict | None) -> dict:
             "class": cls,
             "refs": ref_count.get(rel.lower(), 0),
         }
+        # One read feeds both the Pillow decode and the dedup hash (C5).
         try:
-            img = Image.open(fp)
-            w, h = img.size
-            entry["w"], entry["h"] = w, h
-            entry["alpha"] = alpha_kind(img) if fp.suffix.lower() != ".dds" else "dds"
-        except Exception as e:
-            errors.append(f"{rel} ({e})")
-            w = h = 0
-            entry["alpha"] = "?"
+            raw = fp.read_bytes()
+        except OSError as e:
+            raw = b""
+            errors.append(f"read {rel} ({e})")
+        w = h = 0
+        if raw:
+            hash_groups[hashlib.sha256(raw).hexdigest()].append(rel)
+            try:
+                with Image.open(io.BytesIO(raw)) as img:
+                    w, h = img.size
+                    entry["alpha"] = (
+                        "dds" if fp.suffix.lower() == ".dds"
+                        else images.alpha_kind(img)
+                    )
+            except Exception as e:
+                errors.append(f"{rel} ({e})")
+        entry.setdefault("alpha", "?")
+        entry["w"], entry["h"] = w, h
         if fp.suffix.lower() == ".dds":
-            entry["fourcc"] = dds_fourcc(fp)
+            entry["fourcc"] = dds.fourcc(raw)
 
         # Resolution cap:
         # - size declared in .gui → 2x the largest display (never below).
@@ -173,17 +157,13 @@ def plan(root: Path, scan_result: dict, vanilla_hash: dict | None) -> dict:
             entry["action"] = "skip"
         elif fp.suffix.lower() == ".dds":
             entry["action"] = (
-                "keep" if entry.get("fourcc", "?") in ("DXT1", "DXT3", "DXT5")
+                "keep" if entry.get("fourcc", "?") in dds.UI_FOURCC
                 else "reencode"
             )
         else:
             entry["action"] = "convert"
         files.append(entry)
-
-        try:
-            hash_groups[fsutil.sha256_file(fp)].append(rel)
-        except OSError as e:
-            errors.append(f"hash {rel} ({e})")
+        size_by_path[rel] = entry["bytes"]
 
     duplicates = {
         h: paths for h, paths in hash_groups.items() if len(paths) > 1
@@ -198,40 +178,56 @@ def plan(root: Path, scan_result: dict, vanilla_hash: dict | None) -> dict:
     unused = [e["path"] for e in files if e["refs"] == 0]
 
     return {
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "files": files,
         "errors": errors,
-        "duplicates": {h: ps for h, ps in sorted(duplicates.items(), key=lambda kv: -sum(
-            (root / p).stat().st_size for p in kv[1]))},
+        "duplicates": dict(sorted(
+            duplicates.items(),
+            key=lambda kv: -sum(size_by_path[p] for p in kv[1]),
+        )),
         "vanilla_identical": sorted(vanilla_identical),
         "unused": unused,
         "gui_sizes": {k: list(v) for k, v in sorted(gui_sizes.items())},
     }
 
 
-def write_report(res: dict, root: Path, out_file: Path) -> None:
+def summary(res: dict) -> dict:
+    """Counts used by both the report file and the CLI output."""
     files = res["files"]
-    by_cls = Counter(f["class"] for f in files)
+    sizes = {f["path"]: f.get("bytes", 0) for f in files}
     over = [
         f for f in files
         if f["class"] != "skip"
         and f.get("w", 0) and (f["w"] > f["cap"] or f.get("h", 0) > f["cap"])
     ]
-    waste = sum(f["bytes"] for f in over)
-    dup_waste = sum(
-        sum((root / p).stat().st_size for p in group[1:])
-        for group in res["duplicates"].values() if len(group) > 1
-    )
-    actions = Counter(f["action"] for f in files)
+    return {
+        "files": len(files),
+        "by_class": Counter(f["class"] for f in files),
+        "actions": Counter(f["action"] for f in files),
+        "over": len(over),
+        "waste": sum(f.get("bytes", 0) for f in over),
+        "duplicates": len(res["duplicates"]),
+        "dup_waste": sum(
+            sum(sizes.get(p, 0) for p in group[1:])
+            for group in res["duplicates"].values()
+        ),
+        "vanilla_identical": len(res["vanilla_identical"]),
+        "unused": len(res["unused"]),
+        "errors": len(res["errors"]),
+    }
+
+
+def write_report(res: dict, out_file: Path) -> None:
+    s = summary(res)
     lines = [
         f"Asset analysis {res['generated_at']}",
-        f"Files in gfx/: {len(files)} — per class: {dict(by_cls)}",
-        f"Planned actions: {dict(actions)}",
-        f"Above resolution cap (resizable): {len(over)} ({waste / 1e6:.1f} MB)",
-        f"Duplicates: {len(res['duplicates'])} groups "
-        f"({dup_waste / 1e6:.1f} MB recoverable)",
-        f"Vanilla-identical (no-op overrides): {len(res['vanilla_identical'])}",
-        f"Unreferenced (unused): {len(res['unused'])}",
-        f"Read errors: {len(res['errors'])}",
+        f"Files in gfx/: {s['files']} — per class: {dict(s['by_class'])}",
+        f"Planned actions: {dict(s['actions'])}",
+        f"Above resolution cap (resizable): {s['over']} ({s['waste'] / 1e6:.1f} MB)",
+        f"Duplicates: {s['duplicates']} groups "
+        f"({s['dup_waste'] / 1e6:.1f} MB recoverable)",
+        f"Vanilla-identical (no-op overrides): {s['vanilla_identical']}",
+        f"Unreferenced (unused): {s['unused']}",
+        f"Read errors: {s['errors']}",
     ]
     out_file.write_text("\n".join(lines), encoding="utf-8")

@@ -1,4 +1,4 @@
-"""F9 — Entityfix: audit + targeted rewriting of gfx/entities/*.asset.
+"""Entityfix: audit + targeted rewriting of gfx/entities/*.asset.
 
 - AUDIT (always): entities with more than one attach, attach to non-existent
   entities, entities without `cull_radius`.
@@ -14,9 +14,8 @@ fsutil.read_text/write_text.
 """
 from __future__ import annotations
 
-import json
 import re
-from collections import Counter
+from datetime import UTC, datetime
 from pathlib import Path
 
 from . import fsutil
@@ -76,9 +75,9 @@ def parse_entities(text: str) -> list[dict]:
                 and toks[i + 2][0] == "{"):
             i_open = i + 2
             i_close = _match_brace(toks, i_open)
-            rec: dict = {"start": toks[i][1], "open": toks[i_open][1],
-                         "close": toks[i_close][1], "name": "",
-                         "pdxmesh": "", "has_cull": False, "attach": []}
+            rec: dict = {"open": toks[i_open][1], "close": toks[i_close][1],
+                         "name": "", "pdxmesh": "", "has_cull": False,
+                         "attach": []}
             j = i_open + 1
             while j < i_close:
                 tok, _ = toks[j]
@@ -132,8 +131,6 @@ def parse_ambient_entities(root: Path, vanilla: Path | None) -> set[str]:
     """Entity names instantiated by map/ambient_object*.txt (staging, else
     vanilla: the engine uses the vanilla file when the mod doesn't redefine it)."""
     for base in (root, vanilla) if vanilla else (root,):
-        if not base:
-            continue
         for p in sorted((base / "map").glob("ambient_object*.txt")):
             text, _ = fsutil.read_text(p)
             text = _neutralize_comments(text)
@@ -183,7 +180,8 @@ def run(root: Path, out: Path, apply: bool, vanilla: Path | None,
     targets = [r for r in all_records
                if not r["has_cull"] and r["name"] in ambient]
 
-    lines = [f"Entityfix audit {Path(out / 'entity_report.txt').name}",
+    ts = datetime.now(UTC).isoformat(timespec="seconds")
+    lines = [f"Entityfix audit {ts}",
              f".asset files: {len(files)} — entities: {len(all_records)}",
              f"Total attach: {sum(len(r['attach']) for r in all_records)}",
              f"Ambient entities (ambient_object): {len(ambient)}",
@@ -213,11 +211,11 @@ def run(root: Path, out: Path, apply: bool, vanilla: Path | None,
                 fsutil.write_text(p, new_text, enc)
                 edits.append({"file": p.relative_to(root).as_posix(),
                               "insertions": len(ins)})
-    (out / "entityfix_manifest.json").write_text(
-        json.dumps({"applied": apply, "cull_radius": cull_radius,
-                    "edits": edits, "eligible": len(targets),
-                    "broken_attach": broken}, indent=1, ensure_ascii=False),
-        encoding="utf-8")
+    fsutil.write_json(out / "entityfix_manifest.json", {
+        "applied": apply, "cull_radius": cull_radius,
+        "edits": edits, "eligible": len(targets),
+        "broken_attach": broken,
+    })
     if apply:
         print(f"Applied cull_radius = {cull_radius} to {len(edits)} files "
               f"({sum(e['insertions'] for e in edits)} ambient entities)")

@@ -1,6 +1,6 @@
-"""F8 — Texfix: compliance of MODEL textures (gfx/models, gfx/entities and
-those referenced by the .mesh materials): full mip chain (texconv -m 0)
-and DXT1/DXT5 format. Does not touch 2D UI (the domain of 'convert').
+"""Texfix: compliance of MODEL textures (gfx/models, gfx/entities and those
+referenced by the .mesh materials): full mip chain (texconv -m 0) and
+DXT1/DXT5 format. Does not touch 2D UI (the domain of 'convert').
 
 Automatic fixes:
 - PNG/TGA/JPG under models/entities → compressed .dds twin with mips;
@@ -13,36 +13,19 @@ from __future__ import annotations
 
 import json
 import shutil
-import struct
-import subprocess
 import tempfile
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from PIL import Image
 
-from .convert import alpha_kind
+from . import dds, fsutil, images, parallel
 from .meshscan import expected_mips
-from .tools import texconv_command
+from .tools import convert_to_dds, decode_to_png, texconv_command
 
 TARGET_DIRS = ("gfx/models", "gfx/entities")
 TARGET_EXTS = {".dds", ".png", ".tga", ".jpg", ".jpeg", ".bmp"}
-GOOD_FOURCC = {"DXT1", "DXT5"}
-
-
-def dds_header(path: Path) -> dict | None:
-    try:
-        with path.open("rb") as f:
-            head = f.read(128)
-    except OSError:
-        return None
-    if len(head) < 128 or head[:4] != b"DDS ":
-        return None
-    h, w = struct.unpack_from("<II", head, 12)
-    (mips,) = struct.unpack_from("<I", head, 28)
-    four = head[84:88].decode("ascii", "replace")
-    return {"w": w, "h": h, "mips": mips, "fourcc": four}
+GOOD_FOURCC = dds.MODEL_FOURCC
 
 
 def collect_targets(root: Path, out: Path) -> list[Path]:
@@ -75,7 +58,7 @@ def needed_action(path: Path) -> dict:
         if path.with_suffix(".dds").exists():
             return {"action": "skip", "note": "twin .dds already exists"}
         return {"action": "convert"}
-    hdr = dds_header(path)
+    hdr = dds.read_header(path)
     if hdr is None:
         return {"action": "fix", "why": "unreadable DDS header"}
     why = []
@@ -96,35 +79,15 @@ def _to_pow2(img: Image.Image) -> tuple[Image.Image, bool]:
     ph = 1 << (max(1, h).bit_length() - 1)
     if pw == w and ph == h:
         return img, False
-    return img.resize((pw, ph), Image.LANCZOS), True
+    return img.resize((pw, ph), Image.Resampling.LANCZOS), True
 
 
-def _run_texconv(tdp: Path, feed: Path, fmt: str, cmd: list[str]) -> int:
-    r = subprocess.run(
-        [*cmd, "-nologo", "-f", fmt, "-m", "0", "-y", "-dx9",
-         "-o", str(tdp), str(feed)],
-        capture_output=True, text=True, errors="replace",
-    )
-    return r.returncode
-
-
-def _texconv_png(img: Image.Image, tdp: Path, stem: str, fmt: str,
-                 cmd: list[str]) -> Path:
-    feed = tdp / f"{stem}.png"
-    img.save(feed)
-    r = _run_texconv(tdp, feed, fmt, cmd)
-    out = tdp / f"{stem}.dds"
-    if r != 0 or not out.exists():
-        raise RuntimeError(f"texconv rc={r}")
-    return out
-
-
-def _fix_one(path: Path, cap: int | None, cmd: list[str]) -> dict:
-    rel = str(path)
-    rec: dict = {"path": rel, "action": "", "ok": False}
+def _fix_one(path: Path, cap: int | None, cmd: list[str],
+             plan: dict | None = None) -> dict:
+    rec: dict = {"path": str(path), "action": "", "ok": False}
     try:
         size_before = path.stat().st_size
-        plan = needed_action(path)
+        plan = plan or needed_action(path)
         if plan["action"] == "skip":
             rec.update({"ok": True, "skipped": True, "note": plan.get("note", "")})
             return rec
@@ -132,37 +95,30 @@ def _fix_one(path: Path, cap: int | None, cmd: list[str]) -> dict:
         with tempfile.TemporaryDirectory() as td:
             tdp = Path(td)
             try:
-                img = Image.open(path)
-                img.load()
-            except Exception:
+                img = images.load_rgba(path)
+            except Exception as e:
                 # format not decodable by Pillow (e.g. BC7): decode via
                 # texconv to PNG and reopen.
                 png_out = tdp / f"{path.stem}.png"
-                r = subprocess.run(
-                    [*cmd, "-nologo", "-ft", "png", "-y", "-dx9",
-                     "-o", str(tdp), str(path)],
-                    capture_output=True, text=True, errors="replace",
-                )
+                r = decode_to_png(cmd, path, tdp)
                 if r.returncode != 0 or not png_out.exists():
                     raise RuntimeError(
-                        f"texconv decode rc={r.returncode} {r.stderr[-120:]}")
-                img = Image.open(png_out)
-                img.load()
-            if img.mode not in ("RGB", "RGBA"):
-                img = img.convert("RGBA")
-            w, h = img.size
-            if cap is not None and max(w, h) > cap:
-                scale = cap / max(w, h)
-                img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))),
-                                 Image.LANCZOS)
-                rec["resized_cap"] = True
+                        f"texconv decode rc={r.returncode} {r.stderr[-120:]}"
+                    ) from e
+                img = images.load_rgba(png_out)
+            img, resized_cap = images.resize_cap(img, cap)
+            rec["resized_cap"] = resized_cap
             img, pow2 = _to_pow2(img)
             rec["non_pow2_resized"] = pow2
-            fmt = "DXT1" if alpha_kind(img) == "opaque" else "DXT5"
-            stem = path.stem
-            out_dds = _texconv_png(img, tdp, stem, fmt, cmd)
+            fmt = "DXT1" if images.alpha_kind(img) == "opaque" else "DXT5"
+            feed = tdp / f"{path.stem}.png"
+            img.save(feed)
+            out_dds = tdp / f"{path.stem}.dds"
+            r = convert_to_dds(cmd, feed, tdp, fmt, mips=0)
+            if r.returncode != 0 or not out_dds.exists():
+                raise RuntimeError(f"texconv rc={r.returncode}")
             shutil.copy2(out_dds, target)
-            hdr = dds_header(target) or {}
+            hdr = dds.read_header(target) or {}
             rec.update({
                 "ok": True,
                 "action": plan["action"],
@@ -189,7 +145,6 @@ def run(root: Path, out: Path, apply: bool, workers: int = 12,
     todo = [(p, pl) for pl, p in plans if pl["action"] != "skip"]
     by_action = Counter(pl["action"] for pl, _ in plans)
     print(f"Model textures: {len(targets)} — actions: {dict(by_action)}")
-    cmd = texconv_command(no_wine) if apply else []
     if not apply:
         shown = 0
         for pl, p in plans:
@@ -199,25 +154,15 @@ def run(root: Path, out: Path, apply: bool, workers: int = 12,
                 shown += 1
         print("dry-run: no file written (use --apply).")
         return 0
-    manifest: list[dict] = []
-    done = 0
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futs = {pool.submit(_fix_one, p, cap, cmd): p for p, _ in todo}
-        for f in as_completed(futs):
-            rec = f.result()
-            manifest.append(rec)
-            done += 1
-            if done % 200 == 0:
-                okc = sum(1 for m in manifest if m.get("ok"))
-                print(f"  … {done}/{len(futs)} (ok: {okc})")
-    ok = [m for m in manifest if m.get("ok")]
-    ko = [m for m in manifest if not m.get("ok")]
+    cmd = texconv_command(no_wine)
+    manifest = parallel.run_pool(
+        todo, lambda item: _fix_one(item[0], cap, cmd, item[1]),
+        workers=workers, every=200)
+    ok, ko = parallel.split(manifest)
     delta = sum((m.get("before_bytes") or 0) - (m.get("after_bytes") or 0)
                 for m in ok)
     print(f"Texfix: {len(ok)} ok ({sum(1 for m in ok if m.get('skipped'))} skipped) — "
           f"failed: {len(ko)} — delta: {delta / 1e6:+.1f} MB")
-    (out / "texfix_manifest.json").write_text(
-        json.dumps({"ok": ok, "failed": ko}, indent=1, ensure_ascii=False),
-        encoding="utf-8")
+    fsutil.write_json(out / "texfix_manifest.json", {"ok": ok, "failed": ko})
     print(f"Manifest: {out / 'texfix_manifest.json'}")
     return 0

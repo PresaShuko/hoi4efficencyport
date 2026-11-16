@@ -63,11 +63,25 @@ def _settings() -> dict[str, str]:
                 with f.open("rb") as fh:
                     data = tomllib.load(fh)
             except tomllib.TOMLDecodeError as e:
-                raise SystemExit(f"Invalid hoi4port.toml ({f}): {e}")
+                raise SystemExit(f"Invalid hoi4port.toml ({f}): {e}") from None
             return {k: str(v) for k, v in data.items()
                     if isinstance(v, (str, int)) and not isinstance(v, bool)
                     and v != ""}
     return {}
+
+
+class _Settings:
+    """Lazy, single-read hoi4port.toml for the duration of one command."""
+
+    __slots__ = ("_data",)
+
+    def __init__(self) -> None:
+        self._data: dict[str, str] | None = None
+
+    def get(self, key: str) -> str | None:
+        if self._data is None:
+            self._data = _settings()
+        return self._data.get(key)
 
 
 # --- Steam autodetect -----------------------------------------------------------------
@@ -98,13 +112,7 @@ def _steam_roots() -> list[Path]:
         roots += [home / ".steam/steam", home / ".local/share/Steam",
                   home / ".steam/root",
                   home / ".var/app/com.valvesoftware.Steam/.steam/steam"]
-    seen: set[Path] = set()
-    out = []
-    for r in roots:
-        if r not in seen:
-            seen.add(r)
-            out.append(r)
-    return out
+    return list(dict.fromkeys(roots))
 
 
 _VDF_PATH_RE = re.compile(r'"path"\s+"([^"]+)"')
@@ -141,13 +149,18 @@ def workshop_candidates() -> list[Path]:
 
 # --- individual value resolution --------------------------------------------------------
 
-def _pick(cli: str | None, key: str) -> str | None:
-    return cli or os.environ.get(ENV[key]) or _settings().get(key)
+def _pick(cli: str | None, key: str, settings: _Settings | None = None) -> str | None:
+    if cli:
+        return cli
+    env = os.environ.get(ENV[key])
+    if env:
+        return env
+    return (settings or _Settings()).get(key)
 
 
-def resolve_workshop(value: str | None) -> Path | None:
+def resolve_workshop(value: str | None, settings: _Settings | None = None) -> Path | None:
     """Workshop mod path, or None if it cannot be determined without user input."""
-    value = _pick(value, "mod")
+    value = _pick(value, "mod", settings)
     if value:
         p = Path(value).expanduser()
         if p.is_dir():
@@ -156,7 +169,8 @@ def resolve_workshop(value: str | None) -> Path | None:
             for cand in workshop_candidates():
                 if cand.name == p.name:
                     return cand.resolve()
-            libs = ", ".join(str(l) for l in _steam_libraries()) or "no Steam library found"
+            libs = ", ".join(str(lib) for lib in _steam_libraries()) \
+                or "no Steam library found"
             raise SystemExit(
                 f"--mod: Workshop mod {p.name} not found. Libraries searched: {libs}")
         raise SystemExit(
@@ -166,8 +180,8 @@ def resolve_workshop(value: str | None) -> Path | None:
     return found[0].resolve() if len(found) == 1 else None
 
 
-def resolve_vanilla(value: str | None) -> Path | None:
-    value = _pick(value, "vanilla")
+def resolve_vanilla(value: str | None, settings: _Settings | None = None) -> Path | None:
+    value = _pick(value, "vanilla", settings)
     if value:
         p = Path(value).expanduser()
         if p.is_dir():
@@ -187,11 +201,12 @@ def load_config(
     vanilla: str | None = None,
     out: str | None = None,
 ) -> Config:
-    st = _pick(staging, "staging") or DEFAULT_STAGING_NAME
-    o = _pick(out, "out") or DEFAULT_OUT_NAME
+    settings = _Settings()  # at most one TOML read per command (C1)
+    st = _pick(staging, "staging", settings) or DEFAULT_STAGING_NAME
+    o = _pick(out, "out", settings) or DEFAULT_OUT_NAME
     return Config(
-        workshop_mod=resolve_workshop(mod),
+        workshop_mod=resolve_workshop(mod, settings),
         staging=Path(st).expanduser().resolve(),
-        vanilla=resolve_vanilla(vanilla),
+        vanilla=resolve_vanilla(vanilla, settings),
         out=Path(o).expanduser().resolve(),
     )

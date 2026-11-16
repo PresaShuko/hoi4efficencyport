@@ -1,26 +1,24 @@
-"""F2 — Normalization: reshuffle assets onto vanilla layout + repair references.
+"""Normalization: reshuffle assets onto vanilla layout + repair references.
 
 - move: existing assets outside gfx/ reclassified by consumer (focus icons →
   gfx/interface/goals/, ideas → ideas/, decisions → decisions/, events →
   event_pictures/, portraits → leaders/, other UI → interface/).
 - repair: broken references with a resolvable twin on disk (leading slash,
-  doubled separators, different extension).
-Every change is tracked in build/normalize_manifest.json; dry-run by default.
+  different extension).
+Every change is tracked in build/moves_ledger.json + normalize_manifest.json;
+dry-run by default.
 """
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from . import fsutil, scanner
-
-# Assets already in the vanilla layout: leave untouched (flags/models/entities
-# are resolved by the engine by convention; moving them breaks the lookup).
-KEEP_TOP = ("gfx", "map", "sound", "music")
 
 # (prefix of the referencing file, canonical destination) — first match wins.
 # Direct: whoever contains the literal path.
@@ -33,10 +31,7 @@ DIRECT_RULES = (
     ("events/", "gfx/event_pictures/"),
 )
 # Two hops: where the sprite defined with that texturefile is USED.
-SPRITE_RULES = DIRECT_RULES + (
-    ("events/", "gfx/event_pictures/"),
-    ("interface/", "ui"),
-)
+SPRITE_RULES = DIRECT_RULES + (("interface/", "ui"),)
 # Canonical subfolder per class: if the asset isn't there, it gets moved.
 CANONICAL_DIR = {
     "gfx/leaders/": "gfx/leaders/",
@@ -48,6 +43,9 @@ CANONICAL_DIR = {
 }
 
 RE_TAG = re.compile(r"^GFX_([A-Z0-9]{3})_")
+# Top-level folders that are already in vanilla layout (the engine resolves
+# them by convention); 'gfx' is handled by CANONICAL_DIR below.
+LAYOUT_TOP = ("map", "sound", "music")
 
 
 def _unique_dest(dest: str, taken: set[str]) -> str:
@@ -71,7 +69,7 @@ def _match_rule(dirs: list[str], rules) -> str | None:
 
 
 def _locs_dirs(locs: list[str]) -> list[str]:
-    return [l.rsplit(":", 1)[0].replace("\\", "/").lower() for l in locs]
+    return [loc.rsplit(":", 1)[0].replace("\\", "/").lower() for loc in locs]
 
 
 def _usage_dirs(gfx_refs: dict, name: str) -> list[str]:
@@ -83,8 +81,8 @@ def classify_token(token: str, scan_result: dict, sprite_by_tex: dict[str, list[
                    ref: dict) -> str | None:
     """Consumer class of the asset: direct rules first, then the sprite→use chain.
 
-    Returns the canonical destination ('ui' = gfx/interface/), 'skip' (don't
-    touch) or None (no/ambiguous classification → don't move).
+    Returns the canonical destination ('ui' = gfx/interface/) or None when the
+    classification is missing/ambiguous (the asset is then not moved).
     """
     token_l = token.lower()
     dirs = _locs_dirs(ref["files"])
@@ -102,7 +100,7 @@ def classify_token(token: str, scan_result: dict, sprite_by_tex: dict[str, list[
         return None  # conflicting uses: don't decide from the consumer
 
     if direct:
-        return direct if direct != "ui" else "ui"
+        return direct
     if len(classes) == 1:
         return next(iter(classes))
     if not sprite_names and any(d.startswith("interface/") for d in dirs):
@@ -111,22 +109,14 @@ def classify_token(token: str, scan_result: dict, sprite_by_tex: dict[str, list[
 
 
 def plan_moves(root: Path, scan_result: dict) -> list[dict]:
-    skip_prefixes = tuple(
-        p for p in ("gfx/models/", "gfx/entities/", "gfx/flags/", "gfx/fonts/")
-    )
     # Files already on disk count as taken: a planned destination that would
     # overwrite an existing asset must get a suffixed name instead (BUG-02).
     taken: set[str] = {
         p.relative_to(root).as_posix().lower()
         for p in root.rglob("*") if p.is_file()
     }
-    sprite_by_tex: dict[str, list[str]] = defaultdict(list)
-    for n, s in scan_result["sprite_types"].items():
-        if s.get("texturefile"):
-            sprite_by_tex[s["texturefile"].lower()].append(n)
-    ref_by_lower_lists: dict[str, list[dict]] = defaultdict(list)
-    for r in scan_result["references"]:
-        ref_by_lower_lists[r["token"].lower()].append(r)
+    sprite_by_tex = scanner.sprites_by_texture(scan_result)
+    ref_by_lower = scanner.index_by_token_lower(scan_result)
     canonical_all = tuple(d for d in CANONICAL_DIR.values() if d != "gfx/interface/")
     dest_by_tl: dict[str, str] = {}
     moves: list[dict] = []
@@ -136,10 +126,9 @@ def plan_moves(root: Path, scan_result: dict) -> list[dict]:
         t = r["token"]
         t_norm = Path(t).as_posix()  # collapse //, preserve case
         tl = t_norm.lower()
-        if tl.startswith(skip_prefixes):
+        if tl.startswith(scanner.CONVENTION_DIRS):
             continue
-        top = t.split("/", 1)[0].lower()
-        if top in ("map", "sound", "music"):
+        if t.split("/", 1)[0].lower() in LAYOUT_TOP:
             continue
         if not (root / t).is_file():
             continue  # resolved via the file's own folder (entities): don't touch
@@ -153,7 +142,7 @@ def plan_moves(root: Path, scan_result: dict) -> list[dict]:
         if tl.startswith(canonical_all):
             continue  # already in another class's canonical folder: untouched
         cls = classify_token(t, scan_result, sprite_by_tex, r)
-        if cls is None or cls == "skip":
+        if cls is None:
             continue
         canon = CANONICAL_DIR[cls]
         parts = t_norm.split("/")
@@ -188,7 +177,7 @@ def plan_moves(root: Path, scan_result: dict) -> list[dict]:
         moves.append({"kind": "move", "src": t, "dst": dest, "cls": cls,
                       "locs": r["files"]})
         # case variants (same physical file): rewrite now, move is a no-op later
-        for v in ref_by_lower_lists.get(tl, []):
+        for v in ref_by_lower.get(tl, []):
             if v["token"] != t:
                 moves.append({"kind": "move", "src": v["token"], "dst": dest,
                               "cls": cls, "locs": v["files"]})
@@ -207,12 +196,7 @@ def plan_repairs(root: Path, scan_result: dict) -> list[dict]:
         if cand != t and (root / cand).exists():
             repairs.append({"kind": "repair", "src": t, "dst": cand, "locs": r["files"]})
             continue
-        cand = cand.replace("//", "/")
         p = root / cand
-        if p.exists():
-            if cand != t:
-                repairs.append({"kind": "repair", "src": t, "dst": cand, "locs": r["files"]})
-            continue
         if p.parent.is_dir():
             for q in p.parent.iterdir():
                 if (
@@ -263,7 +247,7 @@ def _rewrite_refs(root: Path, changes: list[dict], apply: bool) -> dict:
 
 def verify(root: Path, changes: list[dict], vanilla: Path | None = None) -> dict:
     post = scanner.scan(root, vanilla)
-    by_token = {r["token"]: r for r in post["references"]}
+    by_token = scanner.index_by_token(post)
     src_residual = sorted(
         {c["src"] for c in changes} & set(by_token)
     )
@@ -293,7 +277,7 @@ def run(root: Path, out: Path, apply: bool, vanilla: Path | None = None,
           f"{len({loc.rsplit(':', 1)[0] for c in changes for loc in c['locs']})} file(s) to rewrite")
 
     result: dict = {
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "dry_run": not apply,
         "moves": moves,
         "repairs": repairs,
@@ -305,8 +289,7 @@ def run(root: Path, out: Path, apply: bool, vanilla: Path | None = None,
             ledger = json.loads(ledger_file.read_text(encoding="utf-8"))
         for c in moves:
             ledger[c["src"].lower()] = c["dst"]
-        ledger_file.write_text(json.dumps(ledger, indent=0, ensure_ascii=False),
-                               encoding="utf-8")
+        fsutil.write_json(ledger_file, ledger, indent=0)
         result["ledger_entries"] = len(ledger)
 
     if changes:
@@ -316,7 +299,6 @@ def run(root: Path, out: Path, apply: bool, vanilla: Path | None = None,
               f"{rewrite_stats['substitutions']} substitutions")
         if apply:
             moved = 0
-            import os
             for c in moves:
                 src_p, dst_p = root / c["src"], root / c["dst"]
                 if not src_p.exists():
@@ -336,6 +318,6 @@ def run(root: Path, out: Path, apply: bool, vanilla: Path | None = None,
         print("No changes needed.")
 
     manifest = out / "normalize_manifest.json"
-    manifest.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+    fsutil.write_json(manifest, result, indent=2)
     print(f"Manifest: {manifest}")
     return result

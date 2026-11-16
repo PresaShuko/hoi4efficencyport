@@ -54,9 +54,18 @@ jobs:
           pyinstaller --onefile --name hoi4port `
             --add-data "pipeline/bin/texconv.exe;pipeline/bin" `
             --distpath dist_exe hoi4port.py
-      - name: Test executable
+      - name: Standalone GUI executable (Windows)
         if: runner.os == 'Windows'
-        run: ./dist_exe/hoi4port.exe --version
+        run: |
+          pyinstaller --onefile --windowed --name hoi4port-gui `
+            --add-data "pipeline/bin/texconv.exe;pipeline/bin" `
+            --distpath dist_exe hoi4port_gui.py
+      - name: Test executables
+        if: runner.os == 'Windows'
+        run: |
+          ./dist_exe/hoi4port.exe --version
+          ./dist_exe/hoi4port.exe --cli --version
+          ./dist_exe/hoi4port-gui.exe --selftest
       - uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.os }}

@@ -329,7 +329,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_val.set_defaults(fn=cmd_validate)
 
     p_log = sub.add_parser("check-log", help="texture/sprite errors from the game error.log")
-    p_log.add_argument("--tail", type=int, default=5000, help="tail lines to analyze")
+    p_log.add_argument("--tail", type=int, default=0, help="tail lines to analyze")
     p_log.set_defaults(fn=cmd_check_log)
 
     p_ms = sub.add_parser("meshscan", help=".mesh analysis: vertices, materials, collision, vanilla baseline")

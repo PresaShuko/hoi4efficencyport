@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from . import config, dds, fsutil, meshscan, scanner, texfix
+from . import config, dds, descriptor, fsutil, meshscan, scanner, texfix
 
 _LOG_DIR = (Path("Paradox Interactive") / config.VANILLA_DIRNAME / "logs"
             / "error.log")
@@ -30,6 +31,82 @@ GAME_LOG_CANDIDATES = (
     # macOS
     Path.home() / "Library/Application Support" / _LOG_DIR,
 )
+
+
+_STATE_ID_RE = re.compile(r'(?m)^\s*id\s*=\s*(\d+)')
+
+
+def _state_map(states_dir: Path) -> dict[int, str]:
+    """state id -> defining file name, from history/states/*.txt."""
+    found: dict[int, str] = {}
+    if not states_dir.is_dir():
+        return found
+    for path in states_dir.glob("*.txt"):
+        try:
+            text = fsutil.read_text(path)[0]
+        except (OSError, UnicodeDecodeError):
+            continue
+        for ident in _STATE_ID_RE.findall(text):
+            found.setdefault(int(ident), path.name)
+    return found
+
+
+def descriptor_problems(root: Path, vanilla: Path | None) -> list[str]:
+    """Consistency of <staging>.mod with descriptor.mod, and replace_path vs
+    vanilla.
+
+    A launcher file that lacks ``replace_path`` makes the game load vanilla
+    *and* the mod's own copies of the same directories: every state id then
+    collides ("State ID conflict", "Failed to create id ... This might crash
+    the game") and the load can crash.
+    """
+    problems: list[str] = []
+    inner_file = root / "descriptor.mod"
+    outer_file = root.parent / f"{root.name}.mod"
+    inner = descriptor.parse_descriptor(
+        fsutil.read_text(inner_file)[0]) if inner_file.is_file() else None
+    bare_tree = inner is None and not outer_file.is_file()
+    if inner is None and not bare_tree:
+        problems.append(f"missing descriptor: {inner_file.name}")
+    if not outer_file.is_file() and not bare_tree:
+        problems.append(
+            f"missing launcher file {outer_file.name}: the game cannot load "
+            f"the mod without it")
+    elif outer_file.is_file():
+        outer = descriptor.parse_descriptor(fsutil.read_text(outer_file)[0])
+        if not outer.path:
+            problems.append(f'{outer_file.name}: no path="..."')
+        if inner is not None:
+            for field in ("name", "version", "supported_version", "tags",
+                          "replace_paths"):
+                a, b = getattr(inner, field), getattr(outer, field)
+                if a != b:
+                    problems.append(
+                        f"{outer_file.name}: {field} differs from "
+                        f"descriptor.mod ({b!r} vs {a!r})")
+            missing = [p for p in inner.replace_paths
+                       if p not in outer.replace_paths]
+            if missing:
+                problems.append(
+                    f"{outer_file.name}: replace_path missing for "
+                    f"{', '.join(missing[:5])}"
+                    + (" …" if len(missing) > 5 else ""))
+
+    declared = {descriptor.normalize_path(p).casefold()
+                for p in (inner or descriptor.Descriptor()).replace_paths}
+    if (vanilla is not None and "history/states" not in declared
+            and (root / "history" / "states").is_dir()):
+        mine = _state_map(root / "history" / "states")
+        theirs = _state_map(vanilla / "history" / "states")
+        shared = [(i, theirs[i], mine[i]) for i in sorted(mine) if i in theirs]
+        if shared:
+            examples = ", ".join(f"{i}: {v} / {m}" for i, v, m in shared[:3])
+            problems.append(
+                f"{len(shared)} state ids exist in vanilla and in the mod, and "
+                f'replace_path="history/states" is not declared: both copies '
+                f"load (State ID conflict, duplicate ids, load crash) "
+                f"({examples})")
+    return problems
 
 
 def run(root: Path, workshop: Path | None, out: Path, vanilla: Path | None) -> int:
@@ -143,8 +220,13 @@ def run(root: Path, workshop: Path | None, out: Path, vanilla: Path | None) -> i
         ef_applied = sum(e.get("insertions", 0) for e in json.loads(
             ef_file.read_text(encoding="utf-8")).get("edits", []))
 
+    desc_problems = descriptor_problems(root, vanilla)
+    problems.extend(desc_problems)
+    desc_state = ("consistent" if not desc_problems
+                  else f"{len(desc_problems)} problem(s)")
     lines = [
         f"Validation {scan['generated_at']}",
+        f"Descriptor: {desc_state}",
         f"Converted DDS files verified: {checked} (fourcc: {dict(fourccs)})",
         f"Header problems: {len(problems)} (not a dds: {len(mislabeled)})",
         f"DDS not a multiple of 4: {odd_dims} (vanilla ships the same -> not an error)",
@@ -181,12 +263,56 @@ def run(root: Path, workshop: Path | None, out: Path, vanilla: Path | None) -> i
         "mesh_files": len(meshes), "mesh_parse_errors": len(mesh_ko),
         "model_textures_nonconforming": len(tex_nonconf),
         "entityfix_cull_applied": ef_applied,
+        "descriptor_problems": desc_problems,
     })
     print(report)
     return 1 if problems else 0
 
 
-def check_log(path: Path | None = None, tail: int = 5000) -> int:
+# Error classes that break a load instead of only polluting the log.
+FATAL_CLASSES = (
+    ("State ID conflict", re.compile(r"State ID conflict", re.I)),
+    ("duplicate id", re.compile(r"Failed to create id .*already exists", re.I)),
+    ("access violation",
+     re.compile(r"Unhandled Exception .*EXCEPTION_ACCESS_VIOLATION", re.I)),
+)
+# Everything else worth counting, in reporting order.
+_LOG_CLASSES = FATAL_CLASSES + (
+    ("malformed token", re.compile(r"Malformed token", re.I)),
+    ("invalid trigger", re.compile(r"Invalid trigger", re.I)),
+    ("invalid effect", re.compile(r"Invalid effect", re.I)),
+    ("failed to validate", re.compile(r"Trigger failed to validate", re.I)),
+    ("missing autonomy_state", re.compile(r"Failed to find autonomy_state", re.I)),
+    ("missing texture", re.compile(r"(Failed to load texture|missing texture|"
+                                   r"Couldn't find texture)", re.I)),
+    ("missing asset", re.compile(r"(Could not load animation|Missing font|"
+                                 r"No font with name|Failed to find sprite)", re.I)),
+    ("invalid version", re.compile(r"Invalid supported_version", re.I)),
+)
+
+
+def _crash_report(log: Path) -> list[str]:
+    """Latest crash of the same install, if any."""
+    crashes = log.parent.parent / "crashes"
+    if not crashes.is_dir():
+        return []
+    dirs = sorted((d for d in crashes.iterdir() if d.is_dir()), reverse=True)
+    if not dirs:
+        return []
+    exc = dirs[0] / "exception.txt"
+    head = ["", f"Latest crash: {dirs[0].name}"]
+    if exc.is_file():
+        body = exc.read_text(encoding="utf-8", errors="replace").splitlines()
+        head += ["  " + ln for ln in body[:8] if ln.strip()]
+    return head
+
+
+def check_log(path: Path | None = None, tail: int = 0) -> int:
+    """Classify a game error.log.
+
+    ``tail`` restricts the analysis to the last N lines (0 = whole file, the
+    default: the game rewrites the log on every launch).
+    """
     log = path or next((p for p in GAME_LOG_CANDIDATES if p.exists()), None)
     if log is None or not Path(log).is_file():
         if path is not None:
@@ -195,13 +321,41 @@ def check_log(path: Path | None = None, tail: int = 5000) -> int:
             print(f"error.log not found in: {[str(p) for p in GAME_LOG_CANDIDATES]}")
             print("Run a game session with the orchestrator, then try again.")
         return 2
-    lines = Path(log).read_text(encoding="utf-8", errors="replace").splitlines()[-tail:]
-    keys = ("texture", "sprite", "gfx_", ".dds", ".png", ".tga", "Failed", "Error")
+    lines = Path(log).read_text(encoding="utf-8", errors="replace").splitlines()
+    if tail:
+        lines = lines[-tail:]
+    keys = ("texture", "sprite", ".dds", ".tga", ".png", ".fnt", ".anim")
+    counts: dict[str, int] = {}
+    examples: dict[str, str] = {}
+    for label, rx in _LOG_CLASSES:
+        matched = [ln for ln in lines if rx.search(ln)]
+        if matched:
+            counts[label] = len(matched)
+            examples[label] = matched[0].split("]: ", 1)[-1][:160]
+    print(f"error.log: {len(lines)} lines analyzed"
+          + (f" (tail {tail})" if tail else ""))
+    if counts:
+        print(f"{'class':24} {'lines':>6}  example")
+        for label, _ in _LOG_CLASSES:
+            if label in counts:
+                print(f"{label:24} {counts[label]:>6}  {examples[label]}")
+    else:
+        print("  no known error class in the tail")
+    fatal = [c for c in FATAL_CLASSES if c[0] in counts]
+    if fatal:
+        labels = ", ".join(c[0] for c in fatal)
+        print(f"FATAL: {labels} — the game cannot load this state; see below")
+        if "State ID conflict" in counts or "duplicate id" in counts:
+            print('  hint: the descriptor is not replacing vanilla. Run '
+                  '"hoi4port validate": it compares descriptor.mod with '
+                  '<staging>.mod and the state ids against vanilla.')
+    for ln in _crash_report(Path(log)):
+        print(ln)
     hits = [ln for ln in lines if any(k.lower() in ln.lower() for k in keys)]
-    print(f"error.log: {len(lines)} lines analyzed (tail), "
-          f"{len(hits)} texture/sprite-related lines")
-    for ln in hits[:30]:
-        print(" ", ln[:200])
-    if len(hits) > 30:
-        print(f"  … {len(hits) - 30} more")
-    return 0
+    if hits:
+        print(f"Texture/sprite-related lines: {len(hits)}")
+        for ln in hits[:30]:
+            print(" ", ln[:200])
+        if len(hits) > 30:
+            print(f"  … {len(hits) - 30} more")
+    return 1 if fatal else 0

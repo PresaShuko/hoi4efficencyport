@@ -170,11 +170,13 @@ def render(name: str, *, version: str, supported_version: str,
 
 
 def launcher_path(staging: Path) -> str:
-    """``mod/<folder>`` when staging sits in a mod folder, else the absolute path."""
-    staging = staging.resolve()
-    if staging.parent.name.lower() == "mod":
-        return f"mod/{staging.name}"
-    return staging.as_posix()
+    """Absolute POSIX path of the mod root, the documented form of ``path``.
+
+    A relative ``path="mod/<folder>"`` is not documented for HoI4 (the wiki
+    shows an absolute Windows path) and a wrong ``path`` silently drops the
+    whole mod, so the absolute spelling is always used.
+    """
+    return staging.resolve().as_posix()
 
 
 def read_source_descriptors(sources: Iterable[Path]) -> list[Descriptor]:

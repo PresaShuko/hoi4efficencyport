@@ -25,6 +25,18 @@ scaling.
   present. It is written *after* the mirror, so the
   descriptors copied from the sources cannot overwrite it. `sync
   --no-descriptor` (or the GUI checkbox) leaves whatever the sources shipped.
+- **Descriptor check in `validate`.** It compares `<staging>.mod` with
+  `descriptor.mod` (name, version, supported_version, tags, replace_path,
+  `path=` presence) and counts state ids shared with vanilla: a launcher file
+  without `replace_path="history/states"` makes vanilla and the mod load
+  together, which is the "State ID conflict" / "Failed to create id … already
+  exists" flood that ends in a crash at load. The launcher `path` is always
+  written absolute (the documented form).
+- **`check-log` classifies the whole log.** One line per class with counts and
+  an example (`State ID conflict`, duplicate id, malformed token, invalid
+  trigger/effect, missing autonomy_state/texture/asset, invalid
+  supported_version), the latest `crashes/hoi4_*` exception, and exit 1 when a
+  load-breaking class is present (`--tail N` for a partial scan).
 - **GUI: mods list.** Ordered list with Add…, Remove, ↑/↓ and "Detect
   installed mods": the order shown is the load order used by `sync`.
 - **GUI: English.** Every label, tooltip, dialog and log line.
@@ -56,7 +68,7 @@ Diagnostics, after validating a real 44 000-file merge:
 - Skipped conversions are counted separately ("Conversion skipped, original
   kept") instead of looking like header problems.
 
-Tests: 308 (was 262), including the descriptor generator and its integration
+Tests: 317 (was 262), including the descriptor generator and its integration
 through `sync`, the merge overlay (later wins, no purge,
 same-size override), `resolve_mods` precedence, the GUI/CLI argv contract with
 several `--mod` flags, sprite block types and the mislabeled-DDS detection.

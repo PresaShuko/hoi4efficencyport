@@ -116,8 +116,8 @@ mod = "3350890356"
 | `meshscan` | `.mesh` analysis: vertices, triangles, materials, collision | no |
 | `texfix` | Model textures: full mip chain + DXT1/DXT5 | `--apply` |
 | `entityfix` | Entity audit + `cull_radius` for ambient objects | `--apply` |
-| `validate` | Post-cutover validation: DDS, scan, disk sizes | no |
-| `check-log` | Texture/sprite errors from the game `error.log` | no |
+| `validate` | Post-cutover validation: DDS, scan, disk sizes, descriptor vs vanilla | no |
+| `check-log` | Error classes from the game `error.log` + latest crash | no |
 | `gui` | Window over the pipeline (same stages, same flags) | as the stages |
 
 Every stage writes JSON manifests/reports into `build/`; a second run is a
@@ -131,7 +131,15 @@ no-op (idempotent).
   lists the mods it found).
 - **Vanilla not found** (non-standard Steam library): `--vanilla <path>`.
 - **Game log**: `check-log` looks for `error.log` in the standard Windows
-  (including OneDrive), Linux (Proton and native) and macOS locations.
+  (including OneDrive), Linux (Proton and native) and macOS locations; it
+  counts the error classes of the whole file, names the example lines, prints
+  the latest `crashes/hoi4_*` exception and exits 1 when a class can prevent
+  the load (`State ID conflict`, `Failed to create id … already exists`).
+- **"State ID conflict" / "Failed to create id" in the game log**: vanilla and
+  the mod are loaded together, i.e. the launcher `.mod` lost its
+  `replace_path`. `validate` compares `<staging>.mod` with `descriptor.mod`
+  and the state ids against vanilla, and prints exactly which `replace_path`
+  is missing; `sync` writes both files from the sources.
 - **Cache**: vanilla sprite names are cached under `%LOCALAPPDATA%\hoi4port\`
   (Linux `$XDG_CACHE_HOME/hoi4port`, macOS `~/Library/Caches/hoi4port`),
   keyed by a hash of the install's `launcher-settings.json`; a game update

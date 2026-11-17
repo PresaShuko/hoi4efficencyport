@@ -125,6 +125,72 @@ class ValidateRunTest(BaseTest):
         self.assertEqual(data["orphans"], 1)
 
 
+class DescriptorCheckTest(BaseTest):
+    """The drift that makes the game load vanilla and the mod together."""
+
+    def tree(self, *, outer: str | None, inner: str, vanilla_states: bool = False):
+        root = self.ws.root / "mod" / "merged"
+        (root / "history" / "states").mkdir(parents=True)
+        (root / "descriptor.mod").write_text(inner, encoding="utf-8")
+        if outer is not None:
+            (root.parent / "merged.mod").write_text(outer, encoding="utf-8")
+        (root / "history" / "states" / "1002-Owensboro.txt").write_text(
+            "state={\n\tid=1002\n\tname=\"STATE_1002\"\n}\n", encoding="utf-8")
+        vanilla = None
+        if vanilla_states:
+            vanilla = self.ws.root / "vanilla"
+            (vanilla / "history" / "states").mkdir(parents=True)
+            (vanilla / "history" / "states" / "1002-Yazd.txt").write_text(
+                "state={\n\tid=1002\n\tname=\"STATE_1002\"\n}\n",
+                encoding="utf-8")
+        return root, vanilla
+
+    def test_consistent_pair_is_clean(self):
+        inner = 'name="merged"\nversion="1"\nreplace_path="history/states"\n'
+        outer = (inner + f'path="{self.ws.root.as_posix()}/mod/merged"\n')
+        root, vanilla = self.tree(outer=outer, inner=inner, vanilla_states=True)
+        self.assertEqual(validate.descriptor_problems(root, vanilla), [])
+
+    def test_missing_launcher_file(self):
+        root, vanilla = self.tree(outer=None, inner='name="merged"\n')
+        problems = validate.descriptor_problems(root, vanilla)
+        self.assertTrue(any("launcher file" in p for p in problems), problems)
+
+    def test_launcher_without_replace_path(self):
+        inner = 'name="merged"\nreplace_path="history/states"\n'
+        outer = f'name="merged"\npath="{self.ws.root.as_posix()}/x"\n'
+        root, vanilla = self.tree(outer=outer, inner=inner)
+        problems = validate.descriptor_problems(root, vanilla)
+        self.assertTrue(any("replace_path differs" in p for p in problems) or
+                        any("replace_path missing" in p for p in problems),
+                        problems)
+
+    def test_launcher_without_path(self):
+        inner = 'name="merged"\n'
+        root, vanilla = self.tree(outer='name="merged"\n', inner=inner)
+        problems = validate.descriptor_problems(root, vanilla)
+        self.assertTrue(any('no path="..."' in p for p in problems), problems)
+
+    def test_vanilla_state_overlap_without_replace_path(self):
+        inner = 'name="merged"\n'
+        outer = f'name="merged"\npath="{self.ws.root.as_posix()}/x"\n'
+        root, vanilla = self.tree(outer=outer, inner=inner, vanilla_states=True)
+        problems = validate.descriptor_problems(root, vanilla)
+        self.assertTrue(any("state ids exist in vanilla" in p for p in problems),
+                        problems)
+
+    def test_state_overlap_is_fine_when_replaced(self):
+        inner = 'name="merged"\nreplace_path="history/states"\n'
+        outer = (inner + f'path="{self.ws.root.as_posix()}/x"\n')
+        root, vanilla = self.tree(outer=outer, inner=inner, vanilla_states=True)
+        self.assertEqual(validate.descriptor_problems(root, vanilla), [])
+
+    def test_bare_tree_is_not_reported(self):
+        root = self.ws.root / "bare"
+        root.mkdir()
+        self.assertEqual(validate.descriptor_problems(root, None), [])
+
+
 class CheckLogTest(unittest.TestCase):
     def test_filters_and_rc(self):
         import tempfile
@@ -135,6 +201,31 @@ class CheckLogTest(unittest.TestCase):
             "[pdx_sprite types]: sprite GFX_x missing\n", encoding="utf-8")
         rc = validate.check_log(path=log)
         self.assertEqual(rc, 0)
+
+    def test_fatal_classes_are_rc1(self):
+        import tempfile
+        log = Path(tempfile.mkdtemp()) / "error.log"
+        log.write_text(
+            "[x]: State ID conflict: Both \"Louisville\" ( a.txt) and "
+            "\"Louisville\" ( b.txt).\n"
+            "[x]: Failed to create id 12500001 50. Already exists in game. "
+            "This might crash the game.\n"
+            "[x]: Invalid trigger 'is_x' in common/decisions/X.txt\n",
+            encoding="utf-8")
+        self.assertEqual(validate.check_log(path=log), 1)
+
+    def test_crash_report_is_shown(self):
+        import tempfile
+        docs = Path(tempfile.mkdtemp()) / "Paradox Interactive" / "HOI4"
+        (docs / "logs").mkdir(parents=True)
+        log = docs / "logs" / "error.log"
+        log.write_text("[x]: random\n", encoding="utf-8")
+        crash = docs / "crashes" / "hoi4_20260101_120000"
+        crash.mkdir(parents=True)
+        (crash / "exception.txt").write_text(
+            "Unhandled Exception C0000005 at address 0x1\n", encoding="utf-8")
+        self.assertEqual(validate.check_log(path=log), 0)
+        self.assertEqual(validate._crash_report(log)[1], "Latest crash: hoi4_20260101_120000")
 
     def test_missing_default_log_rc2(self):
         # default search only: pretend none of the candidates exist

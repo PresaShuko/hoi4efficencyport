@@ -130,10 +130,11 @@ class RenderTest(BaseTest):
 
 
 class LauncherPathTest(BaseTest):
-    def test_inside_a_mod_folder_is_relative(self):
+    def test_always_absolute_even_inside_a_mod_folder(self):
         staging = self.ws.root / "mod" / "provatfrunito"
         staging.mkdir(parents=True)
-        self.assertEqual(descriptor.launcher_path(staging), "mod/provatfrunito")
+        self.assertEqual(descriptor.launcher_path(staging),
+                         staging.resolve().as_posix())
 
     def test_elsewhere_is_absolute(self):
         staging = self.ws.root / "staging"
@@ -170,7 +171,7 @@ class WriteTest(BaseTest):
         self.assertEqual(inner.supported_version, "1.12.14")
         self.assertEqual(inner.tags, ("Gameplay", "Map"))
         self.assertEqual(inner.path, "")
-        self.assertEqual(outer.path, "mod/provatfrunito")
+        self.assertEqual(outer.path, staging.resolve().as_posix())
 
     def test_replace_paths_are_unioned_into_both_files(self):
         a = self.source("one", 'name="One"\n'

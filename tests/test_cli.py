@@ -37,12 +37,26 @@ class SyncCliTest(BaseTest):
         self.assertTrue((staging / "descriptor.mod").is_file())
         self.assertTrue((staging / "gfx" / "fixture" / "test.dds").is_file())
 
-    def test_sync_rejects_out_flag(self):
-        # sync only mirrors into --staging: --out was accepted and ignored
-        rc, _, err = run_cli("sync", "--mod", str(FIXTURE),
-                             "--out", str(self.ws.build))
-        self.assertEqual(rc, 2)
-        self.assertIn("unrecognized arguments", err)
+    def test_sync_merges_several_mods_in_load_order(self):
+        first = self.ws.root / "first"
+        second = self.ws.root / "second"
+        for root, name in ((first, "one"), (second, "two")):
+            (root / "gfx").mkdir(parents=True)
+            (root / "gfx" / f"{name}.png").write_bytes(b"x")
+        (first / "shared.txt").write_text("from first", encoding="utf-8")
+        (second / "shared.txt").write_text("from second", encoding="utf-8")
+        rc, out, err = run_cli("sync", "--mod", str(first), "--mod", str(second),
+                               "--staging", str(self.ws.staging),
+                               "--out", str(self.ws.build))
+        self.assertEqual(rc, 0, err)
+        self.assertTrue((self.ws.staging / "gfx" / "one.png").is_file())
+        self.assertTrue((self.ws.staging / "gfx" / "two.png").is_file())
+        self.assertEqual((self.ws.staging / "shared.txt").read_text(encoding="utf-8"),
+                         "from second", "the later mod must win")
+        report = self.ws.build / "merge_report.json"
+        self.assertTrue(report.is_file(), "merge report missing")
+        self.assertIn("shared.txt", report.read_text(encoding="utf-8"))
+        self.assertIn("later", out.lower() + err.lower())
 
     def test_sync_with_nonexistent_id_errors(self):
         rc, _, err = run_cli("sync", "--mod", "000000000001")

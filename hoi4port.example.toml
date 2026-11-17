@@ -4,6 +4,9 @@
 
 # Workshop mod: numeric Steam ID or direct folder path.
 mod = "3350890356"
+# Several mods, merged into one staging tree in load order (later overrides
+# earlier), exactly like enabling them together in the launcher.
+# mods = ["3350890356", "D:/mods/companion_patch"]
 
 # Working directory (default: ./mod_tfr) and output (default: ./build).
 # staging = "mod_tfr"

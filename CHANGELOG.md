@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.5.0 - 2026-11-17
+
+Merging several mods, an English interface, and a layout that survives DPI
+scaling.
+
+- **Multiple mods, merged in `sync`.** `--mod` is repeatable in every command
+  that takes it (`hoi4port sync --mod A --mod B --mod C`), `HOI4PORT_MOD`
+  accepts an `os.pathsep` list and `hoi4port.toml` accepts
+  `mods = ["A", "B"]`. Sources are overlaid in load order into one staging
+  tree: a file present in a later mod replaces the earlier one, exactly like
+  enabling the mods together in the launcher, and a later mod never deletes
+  another mod's files. The descriptor comes from the last mod that has one.
+  `sync --out build` writes `merge_report.json` listing every overridden file
+  per mod. The base mod still uses `robocopy /MIR`; overlays use `/E /IS` so a
+  same-size, same-timestamp file is still copied byte for byte.
+- **GUI: mods list.** Ordered list with Add…, Remove, ↑/↓ and "Detect
+  installed mods": the order shown is the load order used by `sync`.
+- **GUI: English.** Every label, tooltip, dialog and log line.
+- **GUI: no more overlapping/clipped widgets.** The content lives in a
+  scrollable canvas and the window is sized from Tk's own request instead of
+  hand-computed pixel constants, so the footer stays inside the window at
+  100 %, 133 % and 150 % scaling; on small screens the page scrolls. The log
+  box is pinned to nine lines (a canvas default height used to stretch it) and
+  the scrollbars are 1 px tall so they cannot inflate their container.
+- **GUI: Auto is real and per field.** `texconv`, `cap` and `cull` each have an
+  `auto` checkbox: texconv = `min(16, max(2, logical CPUs))`, cap = auto from
+  the `.gui` sizes, cull = the CLI default 100. The `Auto` button detects CPU,
+  RAM, free space and the HoI4 install, applies all three and logs the reason
+  for each decision; it never turns on Apply changes.
+
+Tests: 274 (was 262), including the merge overlay (later wins, no purge,
+same-size override), `resolve_mods` precedence and the GUI/CLI argv contract
+with several `--mod` flags.
+
 ## 1.4.0 - 2026-11-17
 
 Interfaccia: spiegazioni e rilevamento della macchina.

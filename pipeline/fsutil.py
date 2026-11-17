@@ -45,15 +45,17 @@ def write_json(path: Path, data: Any, indent: int = 1) -> None:
                     encoding="utf-8")
 
 
-def iter_files(root: Path, exts: Iterable[str]) -> Iterator[Path]:
+def iter_files(root: Path, exts: Iterable[str] | None = None) -> Iterator[Path]:
     """Files under ``root`` whose suffix is in ``exts`` (case-insensitive).
+
+    ``exts=None`` yields every file (used by the mod merge).
 
     os.scandir instead of Path.rglob: the dirent already carries the file
     type, so no per-entry stat (rglob+is_file is ~16x slower on Windows).
     Directory symlinks are not followed (same as Path.rglob); file symlinks
     are yielded.
     """
-    wanted = {e.lower() for e in exts}
+    wanted = None if exts is None else {e.lower() for e in exts}
     stack = [os.fspath(root)]
     while stack:
         try:
@@ -65,7 +67,8 @@ def iter_files(root: Path, exts: Iterable[str]) -> Iterator[Path]:
                 try:
                     if entry.is_dir(follow_symlinks=False):
                         stack.append(entry.path)
-                    elif entry.is_file() and os.path.splitext(entry.name)[1].lower() in wanted:
+                    elif entry.is_file() and (wanted is None or
+                                              os.path.splitext(entry.name)[1].lower() in wanted):
                         yield Path(entry.path)
                 except OSError:
                     continue
@@ -133,30 +136,85 @@ def install_stamp(root: Path) -> str:
         return "unknown"
 
 
-def sync_staging(src: Path, dst: Path) -> None:
-    """Mirror workshop → staging. robocopy /MIR is native, multithreaded and handles GBs."""
-    if not src.is_dir():
-        raise SystemExit(f"Source mod not found: {src}")
+def _robocopy(args: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["robocopy", *args],
+        capture_output=True,
+        text=True,
+        # robocopy writes in the console's OEM code page (cp850 on it-IT),
+        # not UTF-8: decoding as UTF-8 mangled "Velocità"/"Terminato".
+        encoding="oem",
+        errors="replace",
+    )
+
+
+def _robocopy_ok(result: subprocess.CompletedProcess[str]) -> None:
+    if result.returncode not in _ROBOCOPY_OK:
+        tail = "\n".join(result.stdout.splitlines()[-15:])
+        raise SystemExit(f"robocopy failed (code {result.returncode}):\n{tail}")
+    print("\n".join(result.stdout.splitlines()[-12:]))
+
+
+def _overridden(src: Path, dst: Path) -> list[str]:
+    """Files of `src` that already exist in `dst` (i.e. this mod overrides)."""
+    hits: list[str] = []
+    for f in iter_files(src):
+        rel = f.relative_to(src)
+        if (dst / rel).exists():
+            hits.append(rel.as_posix())
+    return sorted(hits)
+
+
+def merge_staging(sources: list[Path], dst: Path) -> dict[str, Any]:
+    """Overlay mods into the staging tree in load order (later wins).
+
+    Same semantics as enabling several mods in HoI4: a file present in a later
+    mod replaces the earlier one entirely (no per-key merging). The first sync
+    mirrors with /MIR so stale files disappear; later sources only add and
+    overwrite, never purge, so a mod cannot delete another mod's files.
+    """
+    if not sources:
+        raise SystemExit("Source mod not found: no mod given")
+    for src in sources:
+        if not src.is_dir():
+            raise SystemExit(f"Source mod not found: {src}")
+    report: dict[str, Any] = {"sources": [str(s) for s in sources],
+                              "overridden": {}, "files": 0}
     if shutil.which("robocopy"):
-        result = subprocess.run(
-            [
-                "robocopy", str(src), str(dst),
-                "/MIR", "/MT:16", "/R:2", "/W:2",
-                "/NFL", "/NDL", "/NP",
-            ],
-            capture_output=True,
-            text=True,
-            # robocopy writes in the console's OEM code page (cp850 on it-IT),
-            # not UTF-8: decoding as UTF-8 mangled "Velocità"/"Terminato".
-            encoding="oem",
-            errors="replace",
-        )
-        if result.returncode not in _ROBOCOPY_OK:
-            tail = "\n".join(result.stdout.splitlines()[-15:])
-            raise SystemExit(f"robocopy failed (code {result.returncode}):\n{tail}")
-        print("\n".join(result.stdout.splitlines()[-12:]))
+        for i, src in enumerate(sources):
+            if i == 0:
+                _robocopy_ok(_robocopy([str(src), str(dst), "/MIR", "/MT:16",
+                                        "/R:2", "/W:2", "/NFL", "/NDL", "/NP"]))
+            else:
+                hits = _overridden(src, dst)
+                if hits:
+                    report["overridden"][str(src)] = hits
+                # /IS: robocopy skips "same" files (equal size + timestamp) by
+                # default, which would silently keep the earlier mod's bytes for
+                # a later file that happens to match in size and mtime.
+                _robocopy_ok(_robocopy([str(src), str(dst), "/E", "/IS", "/MT:16",
+                                        "/R:2", "/W:2", "/NFL", "/NDL", "/NP"]))
     else:
         if dst.exists():
             shutil.rmtree(dst)
-        shutil.copytree(src, dst)
+        shutil.copytree(sources[0], dst)
         print(f"Copied (copytree fallback): {dst}")
+        for src in sources[1:]:
+            hits = _overridden(src, dst)
+            if hits:
+                report["overridden"][str(src)] = hits
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+            print(f"Overlaid: {src}")
+    report["files"] = sum(1 for _ in iter_files(dst))
+    if report["overridden"]:
+        total = sum(len(v) for v in report["overridden"].values())
+        print(f"Merged {len(sources)} mods — {total} file(s) overridden by later mods")
+    elif len(sources) > 1:
+        print(f"Merged {len(sources)} mods — no overlapping files")
+    return report
+
+
+def sync_staging(src: Path | list[Path], dst: Path) -> dict[str, Any]:
+    """Mirror one mod (or merge several) into staging."""
+    sources = [src] if isinstance(src, Path) else list(src)
+    return merge_staging(sources, dst)

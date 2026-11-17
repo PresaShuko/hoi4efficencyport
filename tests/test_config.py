@@ -137,6 +137,58 @@ class ResolveWorkshopTest(BaseTest):
             self.assertEqual(config.resolve_workshop(None), Path("C:/m/111").resolve())
 
 
+class ResolveModsTest(BaseTest):
+    def setUp(self):
+        super().setUp()
+        for p in (mock.patch.object(config, "workshop_candidates", lambda: []),
+                  mock.patch.object(config, "_steam_libraries", lambda: [])):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def dirs(self, *names):
+        out = []
+        for n in names:
+            d = self.ws.root / n
+            d.mkdir(parents=True, exist_ok=True)
+            out.append(d.resolve())
+        return out
+
+    def test_cli_list_keeps_load_order(self):
+        a, b = self.dirs("a", "b")
+        with mock.patch.dict(os.environ, clean_env(appdata=self.ws.root)):
+            self.assertEqual(config.resolve_mods([str(a), str(b)]), (a, b))
+
+    def test_env_list_is_split_on_pathsep(self):
+        a, b = self.dirs("a", "b")
+        env = clean_env({"HOI4PORT_MOD": f"{a}{os.pathsep}{b}"},
+                        appdata=self.ws.root)
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(config.resolve_mods(None), (a, b))
+
+    def test_cli_wins_over_env(self):
+        a, b = self.dirs("a", "b")
+        env = clean_env({"HOI4PORT_MOD": str(b)}, appdata=self.ws.root)
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(config.resolve_mods([str(a)]), (a,))
+
+    def test_toml_array_of_mods(self):
+        a, b = self.dirs("a", "b")
+        (self.ws.root / "hoi4port.toml").write_text(
+            f'mods = ["{a.as_posix()}", "{b.as_posix()}"]\n', encoding="utf-8")
+        with mock.patch.dict(os.environ, clean_env(appdata=self.ws.root)):
+            os.chdir(self.ws.root)
+            try:
+                self.assertEqual(config.resolve_mods(None), (a, b))
+            finally:
+                os.chdir(Path(__file__).parent.parent)
+
+    def test_nothing_configured_and_ambiguous_is_empty(self):
+        with mock.patch.dict(os.environ, clean_env(appdata=self.ws.root)), \
+                mock.patch.object(config, "workshop_candidates",
+                                  lambda: [Path("C:/m/1"), Path("C:/m/2")]):
+            self.assertEqual(config.resolve_mods(None), ())
+
+
 class ResolveVanillaTest(BaseTest):
     def test_missing_explicit_vanilla_warns_and_returns_none(self):
         with mock.patch.dict(os.environ, clean_env(appdata=self.ws.root)):

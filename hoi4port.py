@@ -1,7 +1,8 @@
 """hoi4port — asset porting/optimization pipeline for HoI4 mods.
 
 Commands:
-  sync       Mirror the Workshop mod → staging (mod_tfr/), the safe workspace.
+  sync       Mirror one or more mods → staging (mod_tfr/), the safe workspace.
+             Several --mod flags are merged in load order, later overriding.
   scan       Scan staging: asset references, missing GFX_*, sprite definitions,
              vanilla hash baseline for dedup.
   normalize  Vanilla-style asset sorting + reference repair.
@@ -41,8 +42,8 @@ def require_staging(cfg) -> int | None:
 def cmd_sync(args) -> int:
     from pipeline import fsutil
 
-    cfg = load_config(mod=args.mod, staging=args.staging)
-    if cfg.workshop_mod is None:
+    cfg = load_config(mod=args.mod, staging=args.staging, out=args.out)
+    if not cfg.workshop_mods:
         print("Source mod not determined "
               "(no --mod, no HOI4PORT_MOD env, no hoi4port.toml; autodetect "
               "ambiguous or empty).", file=sys.stderr)
@@ -51,14 +52,26 @@ def cmd_sync(args) -> int:
             print("HoI4 Workshop mods found:", file=sys.stderr)
             for c in cands:
                 print(f"  - {c}", file=sys.stderr)
-            print("Use: hoi4port sync --mod <Workshop ID>", file=sys.stderr)
+            print("Use: hoi4port sync --mod <Workshop ID> "
+                  "[--mod <ID> ...]", file=sys.stderr)
         else:
             print("No HoI4 Workshop mods found in known Steam libraries. "
                   "Use: hoi4port sync --mod <Workshop ID or path>",
                   file=sys.stderr)
         return 2
-    print(f"Sync: {cfg.workshop_mod}\n   -> {cfg.staging}")
-    fsutil.sync_staging(cfg.workshop_mod, cfg.staging)
+    mods = cfg.workshop_mods
+    if len(mods) == 1:
+        print(f"Sync: {mods[0]}\n   -> {cfg.staging}")
+    else:
+        print(f"Merge {len(mods)} mods (load order, later overrides):")
+        for i, mod in enumerate(mods, 1):
+            print(f"  {i}. {mod}")
+        print(f"   -> {cfg.staging}")
+    report = fsutil.sync_staging(list(mods), cfg.staging)
+    if len(mods) > 1:
+        cfg.out.mkdir(parents=True, exist_ok=True)
+        fsutil.write_json(cfg.out / "merge_report.json", report)
+        print(f"Merge report: {cfg.out / 'merge_report.json'}")
     return 0
 
 
@@ -207,8 +220,10 @@ def cmd_entityfix(args) -> int:
 # --- argument helpers -----------------------------------------------------------
 
 def add_common(p, *, out: bool = True) -> None:
-    p.add_argument("--mod", help="Workshop ID or path of the mod "
-                                 "(default: autodetect; env HOI4PORT_MOD)")
+    p.add_argument("--mod", action="append",
+                   help="Workshop ID or folder of a mod; repeat it to merge "
+                        "several mods in load order (later overrides earlier). "
+                        "Default: autodetect; env HOI4PORT_MOD")
     p.add_argument("--staging", help="staging path (default: mod_tfr/)")
     if out:
         p.add_argument("--out", help="output dir (default: build/)")
@@ -250,8 +265,8 @@ def build_parser() -> argparse.ArgumentParser:
         argv = argv[1:]
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    p_sync = sub.add_parser("sync", help="mirror Workshop mod -> staging")
-    add_common(p_sync, out=False)
+    p_sync = sub.add_parser("sync", help="mirror one or more mods -> staging")
+    add_common(p_sync)
     p_sync.set_defaults(fn=cmd_sync)
 
     p_scan = sub.add_parser("scan", help="scan asset references and sprites")

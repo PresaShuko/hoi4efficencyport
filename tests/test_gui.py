@@ -43,20 +43,24 @@ class StageCommandTest(GuiBase):
         o = self.gui.Opts(**{**asdict(self.gui.Opts(staging="stg", out="bld")), **kw})
         return self.gui.stage_command(name, o, prefix=["PY"])
 
-    def test_sync_takes_mod_and_staging_only(self):
-        got = self.cmd("sync", mod="D:/mods/x")
-        self.assertEqual(got[0], "PY")
-        self.assertEqual(got[1], "sync")
-        self.assertIn("--mod", got)
-        self.assertEqual(got[got.index("--mod") + 1], str(Path("D:/mods/x").resolve()))
+    def test_sync_repeats_mod_in_load_order(self):
+        got = self.cmd("sync", mods=("D:/mods/first", "D:/mods/second"))
+        self.assertEqual(got[:2], ["PY", "sync"])
+        mods = [got[i + 1] for i, a in enumerate(got) if a == "--mod"]
+        self.assertEqual(mods, [str(Path("D:/mods/first").resolve()),
+                                str(Path("D:/mods/second").resolve())])
         self.assertEqual(got[got.index("--staging") + 1], str(Path("stg").resolve()))
-        self.assertNotIn("--out", got)
+        self.assertEqual(got[got.index("--out") + 1], str(Path("bld").resolve()),
+                         "the merge report belongs in the chosen output folder")
         self.assertNotIn("--apply", got)
+
+    def test_sync_without_mods_passes_no_mod_flag(self):
+        self.assertNotIn("--mod", self.cmd("sync"))
 
     def test_apply_only_reaches_stages_that_write(self):
         # sync mirrors the mod by definition and has no --apply switch.
         for name in self.gui.STAGE_NAMES:
-            got = self.cmd(name, apply=True, mod="m")
+            got = self.cmd(name, apply=True, mods=("m",))
             want = name in self.gui.WRITE and name != "sync"
             self.assertEqual("--apply" in got, want, name)
 
@@ -128,7 +132,7 @@ class ParserContractTest(GuiBase):
         import hoi4port
 
         parser = hoi4port.build_parser()
-        o = self.gui.Opts(mod="D:/mods/m", staging="stg", out="bld",
+        o = self.gui.Opts(mods=("D:/mods/m", "D:/mods/n"), staging="stg", out="bld",
                           vanilla="V:/game", apply=True, workers="4", cap="2048",
                           cull="250", skip_vanilla=True, vanilla_dedup=True,
                           no_moves=True, tail="1500")
@@ -163,19 +167,21 @@ class MachineTest(GuiBase):
         plan = self.gui.plan_auto(self.profile())
         self.assertEqual(plan.workers, "12")
         self.assertEqual(plan.vanilla, "V:/game")
-        self.assertTrue(any("12 thread" in n for n in plan.notes))
+        self.assertTrue(any("12 logical threads" in n for n in plan.notes))
+        self.assertEqual(plan.cap, "", "cap must stay automatic")
+        self.assertEqual(plan.cull, "100")
         self.assertTrue(any("210 GB" in n for n in plan.notes))
 
     def test_plan_warns_about_low_disk_space(self):
         plan = self.gui.plan_auto(self.profile(free_gb=3.2))
-        self.assertTrue(any("sotto 5 GB" in n for n in plan.notes), plan.notes)
+        self.assertTrue(any("Less than 5 GB" in n for n in plan.notes), plan.notes)
         ok = self.gui.plan_auto(self.profile())
-        self.assertFalse(any("sotto 5 GB" in n for n in ok.notes), ok.notes)
+        self.assertFalse(any("Less than 5 GB" in n for n in ok.notes), ok.notes)
 
     def test_plan_reports_missing_vanilla(self):
         plan = self.gui.plan_auto(self.profile(vanilla=""))
         self.assertEqual(plan.vanilla, "")
-        self.assertTrue(any("non rilevata" in n for n in plan.notes), plan.notes)
+        self.assertTrue(any("not found" in n for n in plan.notes), plan.notes)
 
     def test_plan_survives_unknown_ram_and_disk(self):
         plan = self.gui.plan_auto(self.profile(ram_gb=0.0, free_gb=0.0,
@@ -187,10 +193,11 @@ class MachineTest(GuiBase):
 class TooltipCoverageTest(GuiBase):
     """Every control the user can touch must explain itself."""
 
-    REQUIRED = {"mod", "staging", "out", "vanilla", "browse", "detect", "apply",
-                "workers", "cap", "cull", "skip_vanilla", "vanilla_dedup",
-                "no_moves", "continue", "run", "cancel", "open_out", "diag",
-                "copy", "clear", "log", "bar", "auto", "pc"}
+    REQUIRED = {"mods", "add_mod", "remove_mod", "up", "down", "staging", "out",
+                "vanilla", "browse", "detect", "apply", "workers", "cap", "cull",
+                "skip_vanilla", "vanilla_dedup", "no_moves", "continue", "run",
+                "cancel", "open_out", "diag", "copy", "clear", "log", "bar",
+                "auto", "pc"}
 
     def test_every_control_has_an_explanation(self):
         missing = self.REQUIRED - set(self.gui.TOOLTIPS)
@@ -245,11 +252,13 @@ class HelpersTest(GuiBase):
 class SettingsTest(GuiBase):
     def test_roundtrip(self):
         target = self.ws.root / "self.gui.json"
-        src = self.gui.Settings(mod="D:/m", staging="s", apply=True, workers="6",
+        src = self.gui.Settings(mods=["D:/m", "D:/n"], staging="s", apply=True,
+                           workers="6", auto_workers=True,
                            stages=["sync", "validate"], geometry="900x700+10+10")
         src.save(target)
         got = self.gui.Settings.load(target)
-        self.assertEqual(got.mod, "D:/m")
+        self.assertEqual(got.mods, ["D:/m", "D:/n"])
+        self.assertTrue(got.auto_workers)
         self.assertEqual(got.workers, "6")
         self.assertTrue(got.apply)
         self.assertEqual(got.stages, ["sync", "validate"])
@@ -267,11 +276,11 @@ class SettingsTest(GuiBase):
 
     def test_unknown_keys_and_bad_types_are_ignored(self):
         target = self.ws.root / "self.gui.json"
-        target.write_text(json.dumps({"mod": 5, "apply": "yes", "stages":
+        target.write_text(json.dumps({"mods": 5, "apply": "yes", "stages":
                                       ["sync", "bogus"], "extra": 1}),
                           encoding="utf-8")
         got = self.gui.Settings.load(target)
-        self.assertEqual(got.mod, "")
+        self.assertEqual(got.mods, [])
         self.assertFalse(got.apply)
         self.assertEqual(got.stages, ["sync"])
 

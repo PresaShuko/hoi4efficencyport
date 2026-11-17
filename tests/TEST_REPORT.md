@@ -49,6 +49,14 @@ regole in `classify_token`, emerso correggendo BUG-06).
 > `plan_auto` (workers da thread con floor 2 e cap 16, avviso sotto 5 GB,
 > vanilla assente, RAM/spazio sconosciuti) e smoke di `Auto` sulla finestra
 > reale.
+>
+> **Aggiornamento 1.5.0 (2026-11-17)**: **274 test**, tutti verdi. Nuovi:
+> merge di più mod (`test_fsutil.MergeStagingTest`: overlay in ordine, il
+> successivo vince, i file senza estensione passano, nessuna cancellazione,
+> single-source con prune, override di file di pari dimensione) e
+> `test_config.ResolveModsTest` (ordine CLI, lista in env, array TOML,
+> precedenza CLI>env). Aggiornati i test GUI per la lista dei mod e per le
+> opzioni auto per campo.
 
 ## Come rieseguire
 

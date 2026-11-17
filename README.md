@@ -55,6 +55,7 @@ paths with `Sfoglia`/`Rileva`, the ten stages with per-stage status, the global
 
 ```bash
 hoi4port sync --mod 3350890356     # Workshop ID or path -> ./mod_tfr staging
+hoi4port sync --mod 3350890356 --mod D:/mods/patch   # merged, patch wins
 hoi4port scan                      # references, missing sprites, baseline
 hoi4port meshscan                  # mesh metrics (vertices, materials, collision)
 hoi4port texfix --apply            # full mip chain + DXT1/DXT5 model textures

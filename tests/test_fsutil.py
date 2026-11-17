@@ -131,6 +131,67 @@ class SyncStagingTest(BaseTest):
         self.assertNotIn("\uFFFD", text)
 
 
+class MergeStagingTest(BaseTest):
+    def mods(self, *specs):
+        roots = []
+        for name, files in specs:
+            root = self.ws.root / name
+            for rel, data in files.items():
+                f = root / rel
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_bytes(data if isinstance(data, bytes)
+                              else data.encode("utf-8"))
+            roots.append(root)
+        return roots
+
+    def test_later_mod_overrides_and_nothing_is_lost(self):
+        a, b = self.mods(("a", {"gfx/a.png": b"1", "shared.txt": "old"}),
+                         ("b", {"gfx/b.png": b"2", "shared.txt": "new"}))
+        report = fsutil.merge_staging([a, b], self.ws.staging)
+        self.assertEqual((self.ws.staging / "shared.txt").read_text(encoding="utf-8"),
+                         "new")
+        self.assertTrue((self.ws.staging / "gfx" / "a.png").is_file())
+        self.assertTrue((self.ws.staging / "gfx" / "b.png").is_file())
+        self.assertEqual(report["overridden"][str(b)], ["shared.txt"])
+        self.assertNotIn(str(a), report["overridden"], "first mod overrides nothing")
+        self.assertEqual(report["files"], 3)
+
+    def test_single_source_prunes_stale_files(self):
+        a = self.mods(("a", {"keep.txt": "x"}))[0]
+        self.ws.staging.mkdir(parents=True, exist_ok=True)
+        (self.ws.staging / "stale.txt").write_text("gone", encoding="utf-8")
+        fsutil.merge_staging([a], self.ws.staging)
+        self.assertTrue((self.ws.staging / "keep.txt").is_file())
+        self.assertFalse((self.ws.staging / "stale.txt").exists())
+
+    def test_later_mod_never_deletes(self):
+        a, b = self.mods(("a", {"only_in_a.txt": "x", "gfx/s.png": b"1"}),
+                         ("b", {"gfx/s.png": b"2"}))
+        fsutil.merge_staging([a, b], self.ws.staging)
+        self.assertTrue((self.ws.staging / "only_in_a.txt").is_file(),
+                        "a later mod must not purge earlier files")
+        self.assertEqual((self.ws.staging / "gfx" / "s.png").read_bytes(), b"2")
+
+    def test_missing_source_exits(self):
+        with self.assertRaises(SystemExit):
+            fsutil.merge_staging([self.ws.root / "nope"], self.ws.staging)
+        with self.assertRaises(SystemExit):
+            fsutil.merge_staging([], self.ws.staging)
+
+    def test_sync_staging_accepts_one_path_or_a_list(self):
+        a, b = self.mods(("a", {"x.txt": "1"}), ("b", {"y.txt": "2"}))
+        fsutil.sync_staging(a, self.ws.staging)
+        self.assertTrue((self.ws.staging / "x.txt").is_file())
+        fsutil.sync_staging([a, b], self.ws.root / "stg2")
+        self.assertTrue((self.ws.root / "stg2" / "y.txt").is_file())
+
+    def test_files_without_extension_are_merged(self):
+        a = self.mods(("a", {"LICENSE": "text", "descriptor.mod": 'name="m"'}))[0]
+        report = fsutil.merge_staging([a], self.ws.staging)
+        self.assertEqual(report["files"], 2)
+        self.assertTrue((self.ws.staging / "LICENSE").is_file())
+
+
 class TexconvTest(unittest.TestCase):
     def test_bundled_binary_exists(self):
         p = tools._bundled()

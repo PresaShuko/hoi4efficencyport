@@ -42,16 +42,16 @@ MONO = ("Consolas", 9)
 
 # (name, label, one-line help, writes files?)
 STAGES = (
-    ("sync", "Sync", "Workshop → staging", "write"),
-    ("scan", "Scan", "riferimenti, GFX, baseline", "read"),
-    ("normalize", "Normalize", "ordina asset, ripara ref", "write"),
-    ("analyze", "Analyze", "alpha, cap, dedup, inutilizzati", "read"),
+    ("sync", "Sync", "mods → staging (merged)", "write"),
+    ("scan", "Scan", "references, GFX, baseline", "read"),
+    ("normalize", "Normalize", "folder layout, ref repair", "write"),
+    ("analyze", "Analyze", "alpha, cap, dedup, unused", "read"),
     ("convert", "Convert", "PNG/TGA → DDS BC1/BC3", "write"),
-    ("cutover", "Cutover", "riscrive ref, rimuove originali", "write"),
-    ("meshscan", "Meshscan", "vertici, materiali, collisione", "read"),
-    ("texfix", "Texfix", "mip chain + DXT1/5 modelli", "write"),
-    ("entityfix", "Entityfix", "cull_radius per ambient", "write"),
-    ("validate", "Validate", "DDS, riferimenti, dimensioni", "read"),
+    ("cutover", "Cutover", "rewrite refs, drop originals", "write"),
+    ("meshscan", "Meshscan", "vertices, materials, collision", "read"),
+    ("texfix", "Texfix", "mip chain + DXT1/5 models", "write"),
+    ("entityfix", "Entityfix", "cull_radius for ambient", "write"),
+    ("validate", "Validate", "DDS, references, sizes", "read"),
 )
 WRITE = frozenset(n for n, _, _, m in STAGES if m == "write")
 STAGE_NAMES = tuple(n for n, *_ in STAGES)
@@ -65,7 +65,7 @@ VANILLA_STAGES = frozenset({"scan", "normalize", "analyze", "cutover",
 class Opts:
     """Everything the CLI needs for one run, as typed in the window."""
 
-    mod: str = ""
+    mods: tuple[str, ...] = ()
     staging: str = "mod_tfr"
     out: str = "build"
     vanilla: str = ""
@@ -73,6 +73,9 @@ class Opts:
     workers: str = "12"
     cap: str = ""
     cull: str = "100"
+    auto_workers: bool = False
+    auto_cap: bool = True
+    auto_cull: bool = False
     skip_vanilla: bool = False
     vanilla_dedup: bool = False
     no_moves: bool = False
@@ -106,7 +109,10 @@ def stage_command(name: str, o: Opts, prefix: list[str] | None = None) -> list[s
         return cmd + ["--tail", o.tail or "5000"]
     stg, out, van = abs_path(o.staging), abs_path(o.out), abs_path(o.vanilla)
     if name == "sync":
-        return cmd + ["--mod", abs_path(o.mod), "--staging", stg]
+        for mod in o.mods:
+            cmd += ["--mod", abs_path(mod)]
+        # --out receives merge_report.json when more than one mod is merged.
+        return cmd + ["--staging", stg, "--out", out]
     cmd += ["--staging", stg, "--out", out]
     if van and name in VANILLA_STAGES:
         cmd += ["--vanilla", van]
@@ -177,8 +183,13 @@ class SystemProfile:
 @dataclass(frozen=True)
 class AutoPlan:
     workers: str
+    cap: str
+    cull: str
     vanilla: str
     notes: tuple[str, ...]
+
+
+DEFAULT_CULL = "100"
 
 
 def recommend_workers(threads: int) -> int:
@@ -194,18 +205,20 @@ def plan_auto(profile: SystemProfile) -> AutoPlan:
     """Settings this machine should use, plus one human sentence per decision."""
     notes: list[str] = []
     workers = recommend_workers(profile.threads)
-    notes.append(f"CPU: {profile.threads} thread logici → texconv workers {workers}")
+    notes.append(f"CPU: {profile.threads} logical threads → texconv workers {workers}")
     if profile.ram_gb:
         notes.append(f"RAM: {profile.ram_gb:.1f} GB")
     if profile.free_gb and profile.staging_drive:
-        notes.append(f"Spazio libero su {profile.staging_drive}: "
-                     f"{profile.free_gb:.0f} GB (la staging è una copia integrale)")
+        notes.append(f"Free space on {profile.staging_drive} — "
+                     f"{profile.free_gb:.0f} GB (staging is a full copy)")
         if profile.free_gb < 5:
-            notes.append("Spazio sotto 5 GB: la copia della mod potrebbe non entrare.")
+            notes.append("Less than 5 GB free: the merged copy may not fit.")
+    notes.append("Resolution cap: auto from the .gui sizes (no fixed limit)")
+    notes.append(f"cull_radius: {DEFAULT_CULL} (CLI default)")
     notes.append(f"Vanilla: {profile.vanilla}" if profile.vanilla else
-                 "Vanilla: non rilevata, imposta il percorso a mano")
-    return AutoPlan(workers=str(workers), vanilla=profile.vanilla,
-                    notes=tuple(notes))
+                 "Vanilla: not found, set the path by hand")
+    return AutoPlan(workers=str(workers), cap="", cull=DEFAULT_CULL,
+                    vanilla=profile.vanilla, notes=tuple(notes))
 
 
 def _ram_gb() -> float:
@@ -271,7 +284,7 @@ def system_profile(staging: str, vanilla: str = "") -> SystemProfile:
 class Settings:
     """Last-used form state, stored next to the vanilla sprite cache."""
 
-    mod: str = ""
+    mods: list[str] = field(default_factory=list)
     staging: str = "mod_tfr"
     out: str = "build"
     vanilla: str = ""
@@ -279,6 +292,9 @@ class Settings:
     workers: str = "12"
     cap: str = ""
     cull: str = "100"
+    auto_workers: bool = False
+    auto_cap: bool = True
+    auto_cull: bool = False
     skip_vanilla: bool = False
     vanilla_dedup: bool = False
     no_moves: bool = False
@@ -328,88 +344,96 @@ class Settings:
 
 # --- explanations (tooltips) -------------------------------------------------
 STAGE_HELP = {
-    "sync": "Copia speculare della mod in Staging (robocopy /MIR). "
-            "La cartella originale viene solo letta. Cancella dalla staging "
-            "ciò che non è più nella mod.",
-    "scan": "Legge la staging e riporta riferimenti agli asset, GFX_* usati ma "
-            "non definiti, sprite definiti e mai usati, hash della vanilla per "
-            "il dedup. Non scrive file della mod.",
-    "normalize": "Rimette gli asset nell'ordine delle cartelle vanilla e ripara "
-                 "i riferimenti rotti. Con Applica modifiche spento mostra solo "
-                 "il piano.",
-    "analyze": "Costruisce il piano asset: classe (ui, portraits, loading…), "
-               "alpha, dimensione massima dalle .gui, duplicati, file inutilizzati. "
-               "convert e cutover leggono questo piano.",
-    "convert": "Converte PNG/TGA/altri formati in DDS DXT1/DXT5, applica il cap "
-               "di risoluzione e il padding multiplo di 4. Lascia i file "
-               "originali al loro posto: li rimuove cutover.",
-    "cutover": "Riscrive i riferimenti da .png/.tga a .dds, elimina i duplicati "
-               "interni e cancella gli originali rimasti. È la fase che rende "
-               "effettiva la conversione: senza, il gioco non carica i nuovi DDS.",
-    "meshscan": "Analizza i .mesh: vertici, triangoli, materiali, collisione, "
-                "confronto con la baseline vanilla. Solo lettura.",
-    "texfix": "Porta le texture dei modelli a mip chain completa e DXT1/DXT5, "
-              "che il gioco richiede per i modelli 3D. Rilegge mesh_stats.json.",
-    "entityfix": "Aggiunge cull_radius agli ambient object che non ce l'hanno "
-                 "(default 100) e segnala gli attach rotti. Senza --apply fa "
-                 "solo l'audit.",
-    "validate": "Controlla i DDS prodotti (header, fourcc, mip), i riferimenti "
-                "dopo il cutover, gli orfani, le dimensioni su disco e le mesh. "
-                "Esce con codice ≠ 0 se trova problemi.",
+    "sync": "Mirrors the selected mods into the staging tree (robocopy). The "
+            "original folders are only read. With several mods they are merged "
+            "in load order: a file in a later mod replaces the earlier one, "
+            "exactly like enabling them together in the launcher.",
+    "scan": "Reads the staging tree and reports asset references, GFX_* used "
+            "but never defined, sprites defined and never used, and hashes the "
+            "vanilla install for dedup. Writes no mod file.",
+    "normalize": "Puts assets in the vanilla folder layout and repairs broken "
+                 "references. With Apply changes off it only prints the plan.",
+    "analyze": "Builds the asset plan: class (ui, portraits, loading…), alpha, "
+               "resolution cap from the .gui files, duplicates, unused files. "
+               "convert and cutover read this plan.",
+    "convert": "Converts PNG/TGA and other formats to DDS DXT1/DXT5, applies "
+               "the resolution cap and 4-pixel padding. Keeps the originals in "
+               "place: cutover removes them.",
+    "cutover": "Rewrites references from .png/.tga to .dds, removes internal "
+               "duplicates and deletes the remaining originals. This is what "
+               "makes the conversion effective: without it the game will not "
+               "load the new DDS.",
+    "meshscan": "Analyses .mesh files: vertices, triangles, materials, "
+                "collision, compared with the vanilla baseline. Read-only.",
+    "texfix": "Brings model textures to a full mip chain and DXT1/DXT5, which "
+              "the game requires for 3D models. Re-reads mesh_stats.json.",
+    "entityfix": "Adds cull_radius to ambient objects that have none (default "
+                 "100) and reports broken attachments. Without Apply changes "
+                 "it only audits.",
+    "validate": "Checks the produced DDS (header, fourcc, mips), the references "
+                "after cutover, orphans, disk sizes and meshes. Exits non-zero "
+                "when it finds problems.",
 }
 
 TOOLTIPS = {
-    "mod": "Cartella della mod da ottimizzare oppure ID Workshop numerico "
-           "(es. 3350890356). Viene solo letta: sync ne crea una copia in Staging.",
-    "staging": "Copia di lavoro: qui avvengono move, riscritture e conversione, "
-               "quindi la mod originale resta intatta. Default mod_tfr accanto "
-               "all'eseguibile; serve spazio pari alla mod.",
-    "out": "Report e manifest JSON letti dalle fasi successive (piano asset, "
-           "conversioni, verifiche). Non fa parte della mod e si può cancellare.",
-    "vanilla": "Install di Hearts of Iron IV: serve per baseline degli hash, "
-               "dedup e fallback degli sprite. Autodetect dalle librerie Steam.",
-    "browse": "Scegli una cartella dal disco (la scelta non viene applicata "
-              "finché non premi Esegui).",
-    "detect": "Cerca automaticamente la mod nelle Workshop installate o la "
-              "vanilla nelle librerie Steam.",
-    "apply": "Acceso: le fasi che scrivono modificano davvero la staging, dopo "
-             "una conferma che mostra la cartella. Spento: dry-run, nessun file "
-             "toccato (è il default).",
-    "workers": "Quante conversioni texconv in parallelo. Ogni processo usa la "
-               "GPU: oltre il numero di core il guadagno è minimo e cresce la "
-               "memoria occupata. Valori 1–32.",
-    "cap": "Lato massimo in pixel (potenza di 2). Vuoto = cap dedotto dalle "
-           "dimensioni dichiarate nei .gui, che è la scelta giusta quasi sempre.",
-    "cull": "Valore di cull_radius inserito negli ambient object privi di uno "
+    "mods": "Mods to optimize, in load order. Add several to merge them into "
+            "one staging tree: a file present in a later mod replaces the "
+            "earlier one, like the launcher does. The descriptor comes from the "
+            "last mod that has one.",
+    "add_mod": "Pick a mod folder from disk and append it to the load order.",
+    "remove_mod": "Remove the selected mod from the list; its files stay on disk.",
+    "up": "Move the selected mod earlier: it will be overridden by the mods "
+          "below it.",
+    "down": "Move the selected mod later: its files override the mods above it.",
+    "staging": "Working copy: moves, rewrites and conversion happen here, so "
+               "the original mods stay untouched. Default mod_tfr next to the "
+               "executable; needs as much space as the merged mods.",
+    "out": "Reports and JSON manifests that later stages re-read (asset plan, "
+           "conversions, verification). Not part of the mod, safe to delete.",
+    "vanilla": "Hearts of Iron IV install: used for hash baselines, dedup and "
+               "sprite fallbacks. Autodetected from the Steam libraries.",
+    "browse": "Choose a folder from disk (nothing is applied until you press "
+              "Run).",
+    "detect": "Search automatically: Workshop mods for the list, Steam "
+              "libraries for the vanilla install.",
+    "apply": "On: stages that write really modify the staging tree, after a "
+             "confirmation showing the folder. Off: dry run, no file is touched "
+             "(this is the default).",
+    "workers": "How many texconv conversions run in parallel. Each process "
+               "uses the GPU: past the core count the gain is small and memory "
+               "use grows. Values 1–32.",
+    "cap": "Maximum side in pixels (power of two). Auto = cap derived from the "
+           "sizes declared in the .gui files, which is the right choice almost "
+           "always.",
+    "cull": "cull_radius value written into ambient objects that have none "
             "(entityfix). Default 100.",
-    "skip_vanilla": "Non calcola l'hash dell'install vanilla. Più veloce, ma "
-                    "senza baseline non c'è dedup contro i file vanilla.",
-    "vanilla_dedup": "Aggiunge al cutover la cancellazione dei file identici alla "
-                     "vanilla. Spento di default: il fallback per-file non è "
-                     "affidabile quando il file ha flag o bookmark.",
-    "no_moves": "normalize riscrive solo i riferimenti, senza riordinare le "
-                "cartelle degli asset.",
-    "continue": "Non ferma la pipeline al primo errore. Utile per un report "
-                "completo, rischioso perché le fasi successive lavorano su uno "
-                "stato parziale.",
-    "run": "Esegue le fasi selezionate nell'ordine 1→10 (Ctrl+Invio).",
-    "cancel": "Termina il processo in corso e i suoi figli (Esc). La staging può "
-              "restare a metà: rilancia le fasi da capo.",
-    "open_out": "Apre in Explorer la cartella dei report: piano asset, "
-                "manifest di conversione e report di validazione.",
-    "diag": "Analizza l'error.log del gioco: texture e sprite che il gioco non "
-            "riesce a caricare, con il file che li dichiara.",
-    "copy": "Copia tutto il log negli appunti, comodo per allegarlo a una "
-            "segnalazione.",
-    "clear": "Svuota il log (Ctrl+L). Non tocca i report su disco.",
-    "log": "Output delle fasi, colorato per severità: un riepilogo con "
-           "«0 errori» non è un errore.",
-    "bar": "Una tacca per fase selezionata: verde = completata, ambra = in corso.",
-    "auto": "Rileva CPU, RAM, spazio libero e install del gioco, poi imposta "
-            "workers e vanilla per questa macchina. Non cambia il cap e non "
-            "attiva Applica modifiche.",
-    "pc": "Rilevato su questo PC. Aggiornato da «Auto»; nessun valore viene "
-          "inviato altrove.",
+    "skip_vanilla": "Skips hashing the vanilla install. Faster, but without the "
+                    "baseline there is no dedup against vanilla files.",
+    "vanilla_dedup": "Adds removal of files identical to vanilla to cutover. "
+                     "Off by default: the per-file fallback is unreliable when "
+                     "the file carries flags or bookmarks.",
+    "no_moves": "normalize rewrites references only, without reordering the "
+                "asset folders.",
+    "continue": "Does not stop the pipeline on the first error. Useful for a "
+                "complete report, risky because the following stages work on a "
+                "partial state.",
+    "run": "Runs the selected stages in order 1→10 (Ctrl+Enter).",
+    "cancel": "Terminates the running process and its children (Esc). The "
+              "staging tree may be left half-done: run the stages again.",
+    "open_out": "Opens the reports folder in Explorer: asset plan, conversion "
+                "manifests and validation report.",
+    "diag": "Parses the game error.log: textures and sprites the game cannot "
+            "load, with the file that declares them.",
+    "copy": "Copies the whole log to the clipboard, handy when reporting a "
+            "problem.",
+    "clear": "Clears the log (Ctrl+L). Files on disk are untouched.",
+    "log": "Stage output, coloured by severity: a summary saying «0 errors» is "
+           "not an error.",
+    "bar": "One segment per selected stage: green = done, amber = running.",
+    "auto": "Detects this PC (logical CPUs, RAM, free space, HoI4 install) and "
+            "sets workers, cap and cull automatically. Does not turn on Apply "
+            "changes.",
+    "pc": "Detected on this PC. Refreshed by Auto; nothing is sent anywhere.",
 }
 
 
@@ -606,7 +630,10 @@ class ThinScroll(tk.Canvas):
     """6 px scrollbar matching the dark theme (native ones ignore colors)."""
 
     def __init__(self, parent, target: tk.Text):
-        super().__init__(parent, width=6, bg=C["field"], highlightthickness=0)
+        # height=1: a Canvas defaults to 199 px and would stretch its container
+        # (it fills vertically in both uses), inflating the log box.
+        super().__init__(parent, width=6, height=1, bg=C["field"],
+                         highlightthickness=0)
         self.target = target
         self._first, self._last = 0.0, 1.0
         self.thumb = self.create_rectangle(0, 0, 0, 0, fill=C["border_hi"],
@@ -653,19 +680,20 @@ class App:
 
         root.title(f"hoi4port {__version__}")
         root.configure(bg=C["bg"])
-        root.geometry(self.settings.geometry or "1080x930")
-        root.minsize(1000, 830)
         self._pick_fonts()
 
         s = self.settings
-        self.v_mod = tk.StringVar(value=s.mod)
+        self.mods: list[str] = [m for m in s.mods if m.strip()]
         self.v_stg = tk.StringVar(value=s.staging)
         self.v_out = tk.StringVar(value=s.out)
         self.v_van = tk.StringVar(value=s.vanilla)
         self.v_apply = tk.BooleanVar(value=s.apply)
         self.v_workers = tk.StringVar(value=s.workers)
-        self.v_cap = tk.StringVar(value=s.cap)
+        self.v_cap = tk.StringVar(value=s.cap or "auto")
         self.v_cull = tk.StringVar(value=s.cull)
+        self.v_auto_workers = tk.BooleanVar(value=s.auto_workers)
+        self.v_auto_cap = tk.BooleanVar(value=s.auto_cap)
+        self.v_auto_cull = tk.BooleanVar(value=s.auto_cull)
         self.v_skipvan = tk.BooleanVar(value=s.skip_vanilla)
         self.v_vdedup = tk.BooleanVar(value=s.vanilla_dedup)
         self.v_nomoves = tk.BooleanVar(value=s.no_moves)
@@ -676,29 +704,30 @@ class App:
         root.grid_rowconfigure(1, weight=1)
         root.grid_columnconfigure(0, weight=1)
         self._build_header()
-        content = tk.Frame(root, bg=C["bg"])
-        content.grid(row=1, column=0, sticky="nsew", padx=16, pady=(12, 0))
-        content.grid_rowconfigure(1, weight=1)
-        content.grid_columnconfigure(0, weight=1)
-        self._build_paths(content)
-        mid = tk.Frame(content, bg=C["bg"])
-        mid.grid(row=1, column=0, sticky="nsew", pady=(12, 0))
+        self._build_scroll_area()
+        self._build_paths(self.inner)
+        mid = tk.Frame(self.inner, bg=C["bg"])
+        mid.grid(row=1, column=0, sticky="ew", pady=(12, 0))
         self._build_pipeline(mid)
         self._build_options(mid)
-        self._build_log(content)
+        self._build_log(self.inner)
         self._build_footer(root)
+        self._size_window()
 
-        root.protocol("WM_DELETE_WINDOW", self.on_close)
-        root.bind("<Control-Return>", lambda _e: self.run())
-        root.bind("<Escape>", lambda _e: self.cancel())
-        root.bind("<Control-l>", lambda _e: self.clear_log())
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.root.bind("<Control-Return>", lambda _e: self.run())
+        self.root.bind("<Escape>", lambda _e: self.cancel())
+        self.root.bind("<Control-l>", lambda _e: self.clear_log())
+        self.root.bind_all("<MouseWheel>", self._wheel)
+        self._refresh_mods()
         self._hints()
         self._chip()
-        self.root.after(80, self._pump)
-        self.log("Pronto. Scegli la mod e premi Esegui (Ctrl+Invio).", "muted")
-        self.log("Applica modifiche è spento: le fasi che scrivono restano dry-run.",
-                 "muted")
-        self.root.after(120, self._boot_detect)
+        self._sync_auto_states()
+        self.root.bind("<Destroy>", self._on_destroy, add="+")
+        self._pump_id = self.root.after(80, self._pump)
+        self.log("Ready. Pick the mods and press Run (Ctrl+Enter).", "muted")
+        self.log("Apply changes is off: stages that write stay a dry run.", "muted")
+        self._boot_id = self.root.after(120, self._boot_detect)
 
     @staticmethod
     def _pick_fonts():
@@ -709,7 +738,7 @@ class App:
                 MONO = (cand, 9)
                 return
 
-    # -- chrome --------------------------------------------------------------
+    # -- layout --------------------------------------------------------------
     def _build_header(self):
         h = tk.Frame(self.root, bg=C["header"], height=54)
         h.grid(row=0, column=0, sticky="ew")
@@ -732,18 +761,113 @@ class App:
                                 fg=C["muted"], font=UI_SM)
         self.van_txt.pack(side="left", padx=(5, 0))
 
+    def _build_scroll_area(self):
+        """Everything above the footer scrolls, so no DPI or screen size clips."""
+        holder = tk.Frame(self.root, bg=C["bg"])
+        holder.grid(row=1, column=0, sticky="nsew")
+        holder.grid_rowconfigure(0, weight=1)
+        holder.grid_columnconfigure(0, weight=1)
+        self.canvas = tk.Canvas(holder, bg=C["bg"], highlightthickness=0,
+                                borderwidth=0)
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.inner = tk.Frame(self.canvas, bg=C["bg"])
+        self.inner.columnconfigure(0, weight=1)
+        self._win = self.canvas.create_window((0, 0), window=self.inner,
+                                              anchor="nw")
+        self.scrollbar = ThinScroll(holder, self.canvas)
+        self.scrollbar.grid(row=0, column=1, sticky="ns")
+        self.inner.bind("<Configure>", lambda _e: self.canvas.configure(
+            scrollregion=self.canvas.bbox("all")))
+        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(
+            self._win, width=e.width))
+
+    def _wheel(self, event):
+        widget = self.root.winfo_containing(event.x_root, event.y_root)
+        while widget is not None:
+            if isinstance(widget, (tk.Text, tk.Listbox)):
+                return
+            widget = getattr(widget, "master", None)
+        if hasattr(self, "canvas"):
+            self.canvas.yview_scroll(-1 * (event.delta // 120), "units")
+
+    def _size_window(self):
+        """Fit the content and let Tk size the window around header + canvas + footer.
+
+        Hand-computing the height from constants drifts with DPI scaling and
+        pushes the footer outside the window; asking Tk for the requested size
+        after fixing the canvas height cannot.
+        """
+        self.root.update_idletasks()
+        content = self.inner.winfo_reqheight()
+        width = min(max(self.inner.winfo_reqwidth() + 48, 1020),
+                    self.root.winfo_screenwidth() - 80)
+        avail = (self.root.winfo_screenheight() - 80
+                 - self.header_h() - self.footer_h())
+        self.canvas.configure(width=width, height=max(260, min(content, avail)))
+        self.root.update_idletasks()
+        if self.settings.geometry:
+            self.root.geometry(self.settings.geometry)
+        else:
+            self.root.geometry("")
+        self.root.minsize(min(900, width),
+                          self.header_h() + self.footer_h() + 240)
+
+    @staticmethod
+    def header_h() -> int:
+        return 54
+
+    @staticmethod
+    def footer_h() -> int:
+        return 58
+
+    # -- cards ---------------------------------------------------------------
     def _build_paths(self, parent):
-        c = Card(parent, "Percorsi")
+        c = Card(parent, "Paths")
         c.grid(row=0, column=0, sticky="ew")
         b = c.body
         self.hints: dict[str, tk.Label] = {}
+
+        lab = tk.Label(b, text="Mods", bg=C["card"], fg=C["muted"], font=UI,
+                       width=8, anchor="nw")
+        lab.grid(row=0, column=0, sticky="nw", pady=(3, 3))
+        Tooltip(lab, TOOLTIPS["mods"])
+
+        self.mod_list = tk.Listbox(
+            b, height=4, bg=C["field"], fg=C["fg"], font=UI, relief="flat",
+            highlightthickness=1, highlightbackground=C["border"],
+            highlightcolor=C["focus"], selectbackground="#1E3A5F",
+            selectforeground=C["fg"], activestyle="none", exportselection=False)
+        self.mod_list.grid(row=0, column=1, sticky="ew", pady=(3, 3), ipady=3)
+        Tooltip(self.mod_list, TOOLTIPS["mods"])
+        self.mod_list.bind("<<ListboxSelect>>", lambda _e: self._mods_state())
+
+        actions = tk.Frame(b, bg=C["card"])
+        actions.grid(row=0, column=2, sticky="nw", padx=(8, 0), pady=(3, 3))
+        add = button(actions, "Add…", "quiet", self.add_mod)
+        add.grid(row=0, column=0, sticky="ew")
+        Tooltip(add, TOOLTIPS["add_mod"])
+        rem = button(actions, "Remove", "quiet", self.remove_mod)
+        rem.grid(row=0, column=1, sticky="ew", padx=(6, 0))
+        Tooltip(rem, TOOLTIPS["remove_mod"])
+        up = button(actions, "↑", "quiet", lambda: self.move_mod(-1))
+        up.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        Tooltip(up, TOOLTIPS["up"])
+        down = button(actions, "↓", "quiet", lambda: self.move_mod(1))
+        down.grid(row=1, column=1, sticky="ew", padx=(6, 0), pady=(6, 0))
+        Tooltip(down, TOOLTIPS["down"])
+
+        self.mod_hint = tk.Label(b, text="", bg=C["card"], fg=C["dim"],
+                                 font=UI_SM, anchor="nw", justify="left")
+        self.mod_hint.grid(row=0, column=3, sticky="nw", padx=(10, 0), pady=(3, 3))
+        Tooltip(self.mod_hint, TOOLTIPS["mods"])
+        self.hints["Mods"] = self.mod_hint
+
         rows = (
-            ("Mod", self.v_mod, True, "ID Workshop o cartella", "mod"),
-            ("Staging", self.v_stg, False, "cartella di lavoro", "staging"),
-            ("Output", self.v_out, False, "report e manifest", "out"),
-            ("Vanilla", self.v_van, True, "opzionale: baseline e dedup", "vanilla"),
+            ("Staging", self.v_stg, False, "working copy", "staging"),
+            ("Output", self.v_out, False, "reports and manifests", "out"),
+            ("Vanilla", self.v_van, True, "optional: baseline and dedup", "vanilla"),
         )
-        for i, (label, var, detect, hint, key) in enumerate(rows):
+        for i, (label, var, detect, hint, key) in enumerate(rows, start=1):
             lab = tk.Label(b, text=label, bg=C["card"], fg=C["muted"], font=UI,
                            width=8, anchor="w")
             lab.grid(row=i, column=0, sticky="w", pady=3)
@@ -753,12 +877,11 @@ class App:
             Tooltip(e, TOOLTIPS[key])
             bf = tk.Frame(b, bg=C["card"])
             bf.grid(row=i, column=2, sticky="e", padx=(8, 0), pady=3)
-            browse = button(bf, "Sfoglia", "quiet", lambda v=var: self._browse(v))
+            browse = button(bf, "Browse…", "quiet", lambda v=var: self._browse(v))
             browse.pack(side="left")
             Tooltip(browse, TOOLTIPS["browse"])
             if detect:
-                find = button(bf, "Rileva", "quiet",
-                              lambda v=var: self._detect(v))
+                find = button(bf, "Detect", "quiet", lambda v=var: self._detect(v))
                 find.pack(side="left", padx=(6, 0))
                 Tooltip(find, TOOLTIPS["detect"])
             lb = tk.Label(b, text=hint, bg=C["card"], fg=C["dim"], font=UI_SM,
@@ -766,26 +889,31 @@ class App:
             lb.grid(row=i, column=3, sticky="w", padx=(10, 0))
             Tooltip(lb, TOOLTIPS[key])
             self.hints[label] = lb
+
+        detect_mods = button(b, "Detect installed mods", "quiet", self.detect_mods)
+        detect_mods.grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        Tooltip(detect_mods, TOOLTIPS["detect"])
         b.columnconfigure(1, weight=1)
         self.v_stg.trace_add("write", lambda *_a: self._hints())
         self.v_out.trace_add("write", lambda *_a: self._hints())
-        prio = tk.Label(b, text="Priorità: campi → hoi4port.toml → autodetect Steam.",
+        prio = tk.Label(b, text="Priority: these fields → hoi4port.toml → Steam "
+                                "autodetect.",
                         bg=C["card"], fg=C["dim"], font=UI_SM)
-        prio.grid(row=len(rows), column=0, columnspan=4, sticky="w", pady=(7, 0))
-        Tooltip(prio, "Ogni percorso si risolve in quest'ordine: valore scritto "
-                      "qui, variabile HOI4PORT_* , hoi4port.toml, poi Steam.")
+        prio.grid(row=5, column=0, columnspan=4, sticky="w", pady=(7, 0))
+        Tooltip(prio, "Each path resolves in this order: the value written here, "
+                      "the HOI4PORT_* variable, hoi4port.toml, then Steam.")
 
     def _build_pipeline(self, parent):
         c = Card(parent, "Pipeline")
         c.grid(row=0, column=0, sticky="nsew")
         b = c.body
-        note = tk.Label(b, text="Ordine di esecuzione 1 → 10. Le fasi che scrivono "
-                                "seguono l'interruttore «Applica modifiche».",
+        note = tk.Label(b, text="Execution order 1 → 10. Stages that write follow "
+                                "the «Apply changes» switch.",
                         bg=C["card"], fg=C["dim"], font=UI_SM)
         note.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
-        Tooltip(note, "L'ordine conta: convert produce i DDS, cutover riscrive i "
-                      "riferimenti e cancella gli originali, validate controlla "
-                      "il risultato. Passa il mouse su una fase per i dettagli.")
+        Tooltip(note, "Order matters: convert produces the DDS, cutover rewrites "
+                      "the references and deletes the originals, validate checks "
+                      "the result. Hover a stage for details.")
         for i, (name, label, desc, mode) in enumerate(STAGES):
             col, row = divmod(i, 5)
             cell = tk.Frame(b, bg=C["card"])
@@ -804,57 +932,65 @@ class App:
             tk.Label(cell, text=desc, bg=C["card"], fg=C["dim"], font=UI_SM,
                      anchor="w").grid(row=1, column=1, columnspan=3, sticky="w",
                                       padx=(7, 0))
-            tag = tk.Label(cell, text="● scrive" if mode == "write" else "○ legge",
-                           bg=C["card"], fg=C["warn"] if mode == "write" else C["faint"],
-                           font=("Segoe UI", 8), anchor="e")
-            tag.grid(row=1, column=4, sticky="e")
+            tk.Label(cell, text="● writes" if mode == "write" else "○ reads",
+                     bg=C["card"], fg=C["warn"] if mode == "write" else C["faint"],
+                     font=("Segoe UI", 8), anchor="e").grid(row=1, column=4,
+                                                            sticky="e")
             help_text = STAGE_HELP[name]
             if mode == "write":
-                help_text += "\n\nScrive nella staging: serve Applica modifiche."
+                help_text += "\n\nWrites into the staging tree: needs Apply changes."
             tip_tree(cell, help_text)
             self.rows[name] = {"status": status, "state": "pending"}
 
     def _build_options(self, parent):
-        c = Card(parent, "Opzioni")
+        c = Card(parent, "Options")
         c.grid(row=0, column=1, sticky="nsew", padx=(12, 0))
         auto = button(c.head, "Auto", "quiet", self.auto)
         auto.pack(side="right")
         Tooltip(auto, TOOLTIPS["auto"])
         b = c.body
-        sec = tk.Label(b, text="Sicurezza", bg=C["card"], fg=C["muted"],
+        sec = tk.Label(b, text="Safety", bg=C["card"], fg=C["muted"],
                        font=("Segoe UI Semibold", 8))
         sec.pack(anchor="w")
-        Tooltip(sec, "Le fasi che scrivono partono spente: prima si guarda il "
-                     "piano, poi si applica.")
-        sw = Switch(b, "Applica modifiche", self.v_apply)
+        Tooltip(sec, "Stages that write start switched off: look at the plan "
+                     "first, then apply it.")
+        sw = Switch(b, "Apply changes", self.v_apply)
         sw.pack(anchor="w", pady=(5, 0))
         tip_tree(sw, TOOLTIPS["apply"])
-        hint = tk.Label(b, text="Spento = dry-run: nessun file viene toccato.",
+        hint = tk.Label(b, text="Off = dry run: no file is touched.",
                         bg=C["card"], fg=C["dim"], font=UI_SM)
         hint.pack(anchor="w", pady=(2, 7))
         Tooltip(hint, TOOLTIPS["apply"])
 
         grid = tk.Frame(b, bg=C["card"])
         grid.pack(fill="x")
-        for r, (lab, var, text, key) in enumerate((
-                ("texconv", self.v_workers, "processi 1–32", "workers"),
-                ("cap", self.v_cap, "vuoto = auto (.gui)", "cap"),
-                ("cull", self.v_cull, "entityfix radius", "cull"))):
+        self.auto_entries: dict[str, tuple] = {}
+        for r, (lab, var, auto_var, hint_text, key) in enumerate((
+                ("texconv", self.v_workers, self.v_auto_workers,
+                 "parallel jobs 1–32", "workers"),
+                ("cap", self.v_cap, self.v_auto_cap,
+                 "pixels, power of two", "cap"),
+                ("cull", self.v_cull, self.v_auto_cull,
+                 "entityfix radius", "cull"))):
             lbl = tk.Label(grid, text=lab, bg=C["card"], fg=C["muted"], font=UI)
             lbl.grid(row=r, column=0, sticky="w", pady=1)
             Tooltip(lbl, TOOLTIPS[key])
-            e = entry(grid, var, width=4)
-            e.grid(row=r, column=1, sticky="w", padx=(8, 6), ipady=3)
+            chk = Check(grid, "auto", auto_var, bg=C["card"])
+            chk.grid(row=r, column=1, sticky="w", padx=(6, 8), pady=1)
+            tip_tree(chk, TOOLTIPS["auto"] + "\n\n" + TOOLTIPS[key])
+            e = entry(grid, var, width=5)
+            e.grid(row=r, column=2, sticky="w", padx=(0, 6), ipady=3)
             Tooltip(e, TOOLTIPS[key])
-            h = tk.Label(grid, text=text, bg=C["card"], fg=C["dim"], font=UI_SM)
-            h.grid(row=r, column=2, sticky="w")
+            self.auto_entries[key] = (auto_var, e, var)
+            h = tk.Label(grid, text=hint_text, bg=C["card"], fg=C["dim"], font=UI_SM)
+            h.grid(row=r, column=3, sticky="w")
             Tooltip(h, TOOLTIPS[key])
-
+            auto_var.trace_add("write", lambda *_a: self._sync_auto_states())
         tk.Frame(b, bg=C["border"], height=1).pack(fill="x", pady=7)
-        for text, var, key in (("Salta baseline vanilla", self.v_skipvan, "skip_vanilla"),
-                               ("Dedup identici a vanilla", self.v_vdedup, "vanilla_dedup"),
-                               ("Solo ref, nessun move", self.v_nomoves, "no_moves"),
-                               ("Continua dopo un errore", self.v_cont, "continue")):
+        for text, var, key in (("Skip vanilla baseline", self.v_skipvan, "skip_vanilla"),
+                               ("Vanilla dedup", self.v_vdedup, "vanilla_dedup"),
+                               ("Reference repair only", self.v_nomoves, "no_moves"),
+                               ("Continue after an error", self.v_cont, "continue")):
             chk = Check(b, text, var)
             chk.pack(anchor="w", pady=1)
             tip_tree(chk, TOOLTIPS[key])
@@ -864,24 +1000,22 @@ class App:
         c.grid(row=2, column=0, sticky="ew", pady=(12, 0))
         tools = tk.Frame(c.head, bg=C["card"])
         tools.pack(side="right")
-        clear = button(tools, "Svuota", "quiet", self.clear_log)
+        clear = button(tools, "Clear", "quiet", self.clear_log)
         clear.pack(side="right")
         Tooltip(clear, TOOLTIPS["clear"])
-        copy = button(tools, "Copia", "quiet", self.copy_log)
+        copy = button(tools, "Copy", "quiet", self.copy_log)
         copy.pack(side="right", padx=(0, 6))
         Tooltip(copy, TOOLTIPS["copy"])
         lines = 9
-        lh = tkfont.Font(font=MONO).metrics("linespace")
-        wrap = tk.Frame(c.body, bg=C["field"], height=lh * lines + 18,
+        wrap = tk.Frame(c.body, bg=C["field"],
                         highlightbackground=C["border"], highlightthickness=1)
         wrap.pack(fill="x")
-        wrap.pack_propagate(False)
         self.txt = tk.Text(wrap, bg=C["field"], fg=C["fg"], font=MONO,
                            relief="flat", highlightthickness=0, wrap="word",
                            padx=10, pady=8, insertbackground=C["fg"],
                            selectbackground="#1E3A5F", state="disabled",
                            height=lines)
-        self.txt.pack(side="left", fill="both", expand=True)
+        self.txt.pack(side="left", fill="y")
         ThinScroll(wrap, self.txt).pack(side="right", fill="y", padx=(0, 2))
         for tag, col in (("ts", C["ts"]), ("cmd", C["focus"]), ("ok", C["accent"]),
                          ("warn", C["warn"]), ("err", C["err"]),
@@ -890,12 +1024,12 @@ class App:
         Tooltip(self.txt, TOOLTIPS["log"])
 
     def _build_footer(self, root):
-        f = tk.Frame(root, bg=C["header"], height=58)
+        f = tk.Frame(root, bg=C["header"], height=self.footer_h())
         f.grid(row=2, column=0, sticky="ew")
         f.grid_propagate(False)
         left = tk.Frame(f, bg=C["header"])
         left.pack(side="left", padx=16, pady=8)
-        self.phase = tk.Label(left, text="Pronto", bg=C["header"], fg=C["muted"],
+        self.phase = tk.Label(left, text="Ready", bg=C["header"], fg=C["muted"],
                               font=UI_SM, anchor="w")
         self.phase.pack(anchor="w", pady=(0, 4))
         self.bar = StageBar(left, len(STAGES))
@@ -906,37 +1040,101 @@ class App:
         self.pc_txt.pack(side="left", padx=(28, 0))
         Tooltip(self.pc_txt, TOOLTIPS["pc"])
 
-        self.btn_run = button(f, "▶  Esegui", "primary", self.run)
+        self.btn_run = button(f, "▶  Run", "primary", self.run)
         self.btn_run.pack(side="right", padx=(0, 16), pady=14)
         Tooltip(self.btn_run, TOOLTIPS["run"])
-        self.btn_cancel = button(f, "Annulla", "danger", self.cancel)
+        self.btn_cancel = button(f, "Cancel", "danger", self.cancel)
         self.btn_cancel.pack(side="right", padx=(0, 10), pady=14)
         self.btn_cancel.configure(state="disabled")
         Tooltip(self.btn_cancel, TOOLTIPS["cancel"])
         self.btn_diag = button(f, "error.log", "quiet", self.diagnostics)
         self.btn_diag.pack(side="right", padx=(0, 10), pady=14)
         Tooltip(self.btn_diag, TOOLTIPS["diag"])
-        open_out = button(f, "Apri output", "quiet", self.open_out)
+        open_out = button(f, "Open output", "quiet", self.open_out)
         open_out.pack(side="right", padx=(0, 10), pady=14)
         Tooltip(open_out, TOOLTIPS["open_out"])
 
+    # -- mod list ------------------------------------------------------------
+    def _refresh_mods(self, select: int | None = None):
+        self.mod_list.delete(0, "end")
+        for i, mod in enumerate(self.mods, 1):
+            self.mod_list.insert("end", f"{i}. {short_path(Path(mod), 2)}")
+        if select is not None and 0 <= select < len(self.mods):
+            self.mod_list.selection_set(select)
+            self.mod_list.see(select)
+        self._mods_state()
+
+    def _mods_state(self):
+        n = len(self.mods)
+        text = (f"{n} mod{'s' if n != 1 else ''} · last one wins"
+                if n else "no mod selected yet")
+        self.mod_hint.configure(text=text)
+
+    def _selected_mod(self) -> int | None:
+        sel = self.mod_list.curselection()
+        return int(sel[0]) if sel else None
+
+    def add_mod(self):
+        d = filedialog.askdirectory(parent=self.root, mustexist=True,
+                                    title="Select a mod folder")
+        if d:
+            self.mods.append(str(Path(d)))
+            self._refresh_mods(select=len(self.mods) - 1)
+
+    def remove_mod(self):
+        index = self._selected_mod()
+        if index is not None:
+            del self.mods[index]
+            self._refresh_mods(select=min(index, len(self.mods) - 1))
+
+    def move_mod(self, delta: int):
+        index = self._selected_mod()
+        if index is None:
+            return
+        target = index + delta
+        if 0 <= target < len(self.mods):
+            self.mods[index], self.mods[target] = self.mods[target], self.mods[index]
+            self._refresh_mods(select=target)
+
+    def detect_mods(self):
+        try:
+            from pipeline.config import workshop_candidates
+        except Exception:  # noqa: BLE001 - degraded without the package
+            self.log("Detection is not available in this build.", "warn")
+            return
+        found = [str(p) for p in workshop_candidates()]
+        if not found:
+            self.log("No HoI4 Workshop mods found in the Steam libraries.", "warn")
+            return
+        added = [m for m in found if m not in self.mods]
+        self.mods.extend(added)
+        self._refresh_mods(select=len(self.mods) - 1 if added else None)
+        self.log(f"Detected {len(found)} Workshop mod(s), added {len(added)}.",
+                 "ok" if added else "muted")
+
     # -- settings ------------------------------------------------------------
     def opts(self) -> Opts:
+        cap = self.v_cap.get().strip()
+        if self.v_auto_cap.get() or cap.lower() == "auto":
+            cap = ""
         return Opts(
-            mod=self.v_mod.get(), staging=self.v_stg.get(), out=self.v_out.get(),
+            mods=tuple(self.mods), staging=self.v_stg.get(), out=self.v_out.get(),
             vanilla=self.v_van.get(), apply=bool(self.v_apply.get()),
-            workers=self.v_workers.get(), cap=self.v_cap.get(),
-            cull=self.v_cull.get(), skip_vanilla=bool(self.v_skipvan.get()),
+            workers=self.v_workers.get(), cap=cap, cull=self.v_cull.get(),
+            skip_vanilla=bool(self.v_skipvan.get()),
             vanilla_dedup=bool(self.v_vdedup.get()),
             no_moves=bool(self.v_nomoves.get()),
             continue_on_error=bool(self.v_cont.get()))
 
     def collect_settings(self) -> Settings:
-        s = Settings(mod=self.v_mod.get().strip(), staging=self.v_stg.get().strip(),
+        s = Settings(mods=list(self.mods), staging=self.v_stg.get().strip(),
                      out=self.v_out.get().strip(), vanilla=self.v_van.get().strip(),
                      apply=bool(self.v_apply.get()),
                      workers=self.v_workers.get().strip(), cap=self.v_cap.get().strip(),
                      cull=self.v_cull.get().strip(),
+                     auto_workers=bool(self.v_auto_workers.get()),
+                     auto_cap=bool(self.v_auto_cap.get()),
+                     auto_cull=bool(self.v_auto_cull.get()),
                      skip_vanilla=bool(self.v_skipvan.get()),
                      vanilla_dedup=bool(self.v_vdedup.get()),
                      no_moves=bool(self.v_nomoves.get()),
@@ -951,8 +1149,8 @@ class App:
     def on_close(self):
         if self.proc is not None:
             if not messagebox.askokcancel(
-                    "Esecuzione in corso",
-                    "Una fase sta girando: interromperla e uscire?", parent=self.root):
+                    "Stage running",
+                    "A stage is running: stop it and quit?", parent=self.root):
                 return
             self.cancel()
         self.collect_settings().save()
@@ -966,28 +1164,17 @@ class App:
 
     def _detect(self, var):
         try:
-            from pipeline.config import resolve_vanilla, workshop_candidates
+            from pipeline.config import resolve_vanilla
         except Exception:  # noqa: BLE001 - degraded without the package
-            self.log("Rilevamento non disponibile (pipeline non importabile).", "warn")
+            self.log("Detection is not available in this build.", "warn")
             return
-        if var is self.v_van:
-            path = resolve_vanilla(None)
-            if not path:
-                self.log("Install vanilla non trovata: imposta il percorso a mano.",
-                         "warn")
-                return
-            var.set(str(path))
-            self.log(f"Vanilla: {path}", "ok")
-        else:
-            cands = workshop_candidates()
-            if not cands:
-                self.log("Nessuna mod Workshop trovata.", "warn")
-                return
-            var.set(str(cands[0]))
-            extra = (f" ({len(cands)} mod trovate, impostata la prima)"
-                     if len(cands) > 1 else "")
-            self.log(f"Mod: {cands[0]}{extra}", "warn" if len(cands) > 1 else "ok")
+        path = resolve_vanilla(None)
+        if not path:
+            self.log("HoI4 install not found: set the path by hand.", "warn")
+            return
+        var.set(str(path))
         self._chip()
+        self.log(f"Vanilla: {path}", "ok")
 
     def _hints(self):
         for key, var in (("Staging", self.v_stg), ("Output", self.v_out)):
@@ -1000,43 +1187,6 @@ class App:
             except OSError:
                 lb.configure(text=raw)
 
-    def _pc(self, profile: "SystemProfile") -> None:
-        bits = [f"{profile.threads} thread", f"{profile.ram_gb:.1f} GB RAM"]
-        if profile.free_gb and profile.staging_drive:
-            bits.append(f"{profile.staging_drive} {profile.free_gb:.0f} GB liberi")
-        self.pc_txt.configure(text=" · ".join(bits))
-
-    def _boot_detect(self) -> None:
-        """First run: seed the machine-dependent options instead of the CLI's."""
-        profile = system_profile(self.v_stg.get(), self.v_van.get())
-        plan = plan_auto(profile)
-        if self._fresh:
-            self.v_workers.set(plan.workers)
-        if plan.vanilla and not self.v_van.get().strip():
-            self.v_van.set(plan.vanilla)
-        self._chip()
-        self._pc(profile)
-        if self._fresh:
-            self.log(f"PC: {self.pc_txt.cget('text')}", "muted")
-            self.log(f"Auto: workers {plan.workers} per {profile.threads} thread "
-                     f"logici (modificabile, o premi Auto per riapplicare).",
-                     "muted")
-
-    def auto(self) -> None:
-        """Detect this machine and apply the options that depend on it."""
-        profile = system_profile(self.v_stg.get(), self.v_van.get())
-        plan = plan_auto(profile)
-        self.v_workers.set(plan.workers)
-        if plan.vanilla:
-            self.v_van.set(plan.vanilla)
-        self._chip()
-        self._pc(profile)
-        for note in plan.notes:
-            self.log(f"Auto: {note}", "muted")
-        self.log(f"Auto: impostati workers {plan.workers}"
-                 + (", vanilla rilevata" if plan.vanilla else
-                    ", vanilla non trovata"), "ok")
-
     def _chip(self):
         van = self.v_van.get().strip()
         if van:
@@ -1045,6 +1195,67 @@ class App:
         else:
             self.van_txt.configure(text="vanilla: autodetect")
             self.van_dot.configure(fg=C["faint"])
+
+    def _sync_auto_states(self):
+        """Disable a field whose auto box is on, and show the auto value."""
+        auto_values = {
+            "workers": lambda: str(recommend_workers(os.cpu_count() or 0)),
+            "cap": lambda: "auto",
+            "cull": lambda: DEFAULT_CULL,
+        }
+        for key, (var, widget, shown) in getattr(self, "auto_entries", {}).items():
+            on = bool(var.get())
+            widget.configure(state="disabled" if on else "normal",
+                             disabledbackground=C["field"],
+                             disabledforeground=C["dim"])
+            if on:
+                shown.set(auto_values[key]())
+
+    def _pc(self, profile: "SystemProfile") -> None:
+        bits = [f"{profile.threads} threads", f"{profile.ram_gb:.1f} GB RAM"]
+        if profile.free_gb and profile.staging_drive:
+            bits.append(f"{profile.staging_drive} {profile.free_gb:.0f} GB free")
+        bits.append("vanilla detected" if profile.vanilla else "vanilla not set")
+        self.pc_txt.configure(text=" · ".join(bits))
+
+    def _apply_auto(self, profile: "SystemProfile") -> "AutoPlan":
+        plan = plan_auto(profile)
+        self.v_auto_workers.set(True)
+        self.v_auto_cap.set(True)
+        self.v_auto_cull.set(True)
+        self.v_workers.set(plan.workers)
+        self.v_cap.set("auto")
+        self.v_cull.set(plan.cull)
+        if plan.vanilla:
+            self.v_van.set(plan.vanilla)
+        self._sync_auto_states()
+        self._chip()
+        self._pc(profile)
+        return plan
+
+    def _boot_detect(self) -> None:
+        profile = system_profile(self.v_stg.get(), self.v_van.get())
+        plan = plan_auto(profile)
+        if self._fresh:
+            self._apply_auto(profile)
+            self.log(f"PC: {self.pc_txt.cget('text')}", "muted")
+            self.log(f"Auto: workers {plan.workers} for {profile.threads} logical "
+                     f"threads; cap and cull left automatic (press Auto to redo).",
+                     "muted")
+        else:
+            if plan.vanilla and not self.v_van.get().strip():
+                self.v_van.set(plan.vanilla)
+            self._pc(profile)
+            self._chip()
+
+    def auto(self) -> None:
+        profile = system_profile(self.v_stg.get(), self.v_van.get())
+        plan = self._apply_auto(profile)
+        for note in plan.notes:
+            self.log(f"Auto: {note}", "muted")
+        self.log(f"Auto: workers {plan.workers}, cap auto, cull {plan.cull}"
+                 + (", vanilla detected" if plan.vanilla else
+                    ", vanilla not found"), "ok")
 
     def log(self, text, tag="info", ts=None):
         self.txt.configure(state="normal")
@@ -1071,14 +1282,14 @@ class App:
         if p.exists():
             os.startfile(p)  # noqa: S606 - Windows shell
         else:
-            self.log(f"Output non trovato: {p.resolve()}", "warn")
+            self.log(f"Output folder not found: {p.resolve()}", "warn")
 
     def set_stage(self, name, state, secs=None):
         row = self.rows[name]
         row["state"] = state
         text, color = {
-            "pending": ("—", C["dim"]), "running": ("● in corso", C["warn"]),
-            "ok": ("✓", C["accent"]), "err": ("✗ errore", C["err"]),
+            "pending": ("—", C["dim"]), "running": ("● running", C["warn"]),
+            "ok": ("✓", C["accent"]), "err": ("✗ error", C["err"]),
         }[state]
         if state == "ok" and secs is not None:
             text = f"✓ {secs:.1f} s"
@@ -1096,33 +1307,36 @@ class App:
     # -- execution -----------------------------------------------------------
     def _validate(self, stages) -> Opts | None:
         if not stages:
-            self.log("Nessuna fase selezionata.", "warn")
+            self.log("No stage selected.", "warn")
             return None
-        if "sync" in stages and not self.v_mod.get().strip():
-            self.log("Serve la cartella (o l'ID) della mod per sync.", "err")
+        if "sync" in stages and not self.mods:
+            self.log("Add at least one mod folder for sync.", "err")
             return None
         if not self.v_stg.get().strip() or not self.v_out.get().strip():
-            self.log("Staging e Output non possono essere vuoti.", "err")
+            self.log("Staging and Output cannot be empty.", "err")
             return None
-        if self.v_cap.get().strip():
+        cap = self.v_cap.get().strip()
+        if cap and cap.lower() != "auto":
             try:
-                if int(self.v_cap.get()) < 1:
+                if int(cap) < 1:
                     raise ValueError
             except ValueError:
-                self.log("cap deve essere un intero positivo (o vuoto).", "err")
+                self.log("cap must be a positive integer (or auto).", "err")
                 return None
         o = self.opts()
         o = Opts(**{**asdict(o),
                     "workers": str(clamp_int(o.workers, 12, 1, 32)),
                     "cull": str(clamp_int(o.cull, 100, 0, 100_000))})
-        self.v_workers.set(o.workers)
-        self.v_cull.set(o.cull)
+        if not self.v_auto_workers.get():
+            self.v_workers.set(o.workers)
+        if not self.v_auto_cull.get():
+            self.v_cull.set(o.cull)
         if o.apply and any(s in WRITE for s in stages):
             if not messagebox.askokcancel(
-                    "Applica modifiche",
-                    "Le fasi in modalità APPLICA modificheranno i file in:\n\n"
-                    f"{Path(o.staging).resolve()}\n\nContinuare?", parent=self.root):
-                self.log("Annullato prima di iniziare.", "muted")
+                    "Apply changes",
+                    "Stages in APPLY mode will modify files in:\n\n"
+                    f"{Path(o.staging).resolve()}\n\nContinue?", parent=self.root):
+                self.log("Cancelled before starting.", "muted")
                 return None
         return o
 
@@ -1140,24 +1354,20 @@ class App:
     def diagnostics(self):
         if not self.finished:
             return
-        o = self.opts()
-        self._start([("check-log", stage_command("check-log", o))])
+        self._start([("check-log", stage_command("check-log", self.opts()))])
 
-    def _start(self, cmds: "list[tuple[str, list[str]]]"):
+    def _start(self, cmds):
         self.errors = self.warns = 0
         self.t0 = time.perf_counter()
         self.finished = False
         self._run_state(False)
         self.btn_cancel.configure(state="normal")
         self.clear_log()
-        title = " → ".join(n for n, _ in cmds)
-        self.log(f"hoi4port {__version__} — {title}", "cmd")
+        self.log(f"hoi4port {__version__} — {' → '.join(n for n, _ in cmds)}", "cmd")
         self.bar.set(0, 0)
-        self.phase.configure(text=f"Fase 1 di {len(cmds)} — avvio")
+        self.phase.configure(text=f"Stage 1 of {len(cmds)} — starting")
         for name in STAGE_NAMES:
             self.set_stage(name, "pending")
-        # Tk variables must only be read on the main thread: snapshot the one
-        # option the worker needs before handing it the queue.
         keep_going = bool(self.v_cont.get())
         threading.Thread(target=self._worker, args=(cmds, keep_going),
                          daemon=True).start()
@@ -1166,8 +1376,8 @@ class App:
         total = len(cmds)
         for i, (name, cmd) in enumerate(cmds):
             self.q.put(("stage", (name, "running", i, total)))
-            self.q.put(("log", ("  $ " + " ".join(cmd[3:] if cmd[1:2] == ["--cli"]
-                                                  else cmd[2:]), "cmd")))
+            shown = cmd[3:] if cmd[1:2] == ["--cli"] else cmd[2:]
+            self.q.put(("log", ("  $ " + " ".join(shown), "cmd")))
             t0 = time.perf_counter()
             rc = 1
             try:
@@ -1182,7 +1392,7 @@ class App:
                         self.q.put(("log", (line, classify(line))))
                 rc = self.proc.wait()
             except Exception as exc:  # noqa: BLE001 - surfaced in the log
-                self.q.put(("log", (f"Errore: {exc}", "err")))
+                self.q.put(("log", (f"Error: {exc}", "err")))
             finally:
                 self.proc = None
             secs = time.perf_counter() - t0
@@ -1206,7 +1416,7 @@ class App:
                         self.set_stage(name, state, rest[0] if rest else None)
                     if state == "running":
                         self.bar.set(i, i)
-                        self.phase.configure(text=f"Fase {i + 1} di {total} — {name}")
+                        self.phase.configure(text=f"Stage {i + 1} of {total} — {name}")
                 elif kind == "done":
                     self.finished = True
                     self._run_state(True)
@@ -1216,18 +1426,30 @@ class App:
                     done = sum(1 for r in self.rows.values() if r["state"] == "ok")
                     self.bar.set(done)
                     self.phase.configure(
-                        text=f"{'Interrotto' if bad else 'Completato'} — "
-                             f"{self.errors} errori · {self.warns} avvisi")
-                    self.log(f"Fine: {dt:.1f} s — {self.errors} errori, "
-                             f"{self.warns} avvisi.", "err" if bad else "ok")
+                        text=f"{'Interrupted' if bad else 'Completed'} — "
+                             f"{self.errors} errors · {self.warns} warnings")
+                    self.log(f"Done: {dt:.1f} s — {self.errors} errors, "
+                             f"{self.warns} warnings.", "err" if bad else "ok")
         except queue.Empty:
             pass
         self._chip()
-        self.root.after(80, self._pump)
+        self._pump_id = self.root.after(80, self._pump)
+
+    def _on_destroy(self, event=None):
+        if event is not None and getattr(event, "widget", None) is not self.root:
+            return
+        for attr in ("_pump_id", "_boot_id"):
+            tid = getattr(self, attr, None)
+            if tid:
+                try:
+                    self.root.after_cancel(tid)
+                except tk.TclError:
+                    pass
+                setattr(self, attr, None)
 
     def cancel(self):
         if self.proc is not None:
-            self.log("Interruzione richiesta …", "warn")
+            self.log("Cancellation requested …", "warn")
             try:
                 subprocess.run(["taskkill", "/T", "/F", "/PID", str(self.proc.pid)],
                                capture_output=True, creationflags=0x08000000)

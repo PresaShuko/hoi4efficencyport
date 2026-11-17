@@ -20,15 +20,46 @@ class ValidateRunTest(BaseTest):
     def _minimal_gfx(self):
         self.ws.mkdirs("gfx")
 
-    def test_bad_dimensions_reported_and_rc1(self):
+    def test_odd_dimensions_are_counted_not_a_problem(self):
+        # Vanilla HoI4 ships 11 745 of 21 898 DDS with non-%4 dimensions and
+        # loads them: reencoded sources keep their size, so this cannot be an
+        # error without telling users to "fix" vanilla.
         self._minimal_gfx()
-        dds = self.ws.modsrc / "gfx" / "a.dds"
-        dds.write_bytes(crafted_dds(6, 6, b"DXT1", 1))   # not %4
+        (self.ws.modsrc / "gfx" / "a.dds").write_bytes(crafted_dds(6, 6, b"DXT1", 1))
         write_convert_manifest(self.ws.build, ["gfx/a.png"])
+        rc = validate.run(self.ws.modsrc, None, self.ws.build, None)
+        self.assertEqual(rc, 0)
+        data = json.loads((self.ws.build / "validate.json").read_text("utf-8"))
+        self.assertEqual(data["odd_dimensions"], 1)
+        self.assertFalse(any("multiple of 4" in p for p in data["problems"]))
+
+    def test_png_disguised_as_dds_is_a_problem(self):
+        self._minimal_gfx()
+        (self.ws.modsrc / "gfx" / "a.dds").write_bytes(
+            b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)
+        self.ws.build.mkdir(parents=True, exist_ok=True)
+        (self.ws.build / "convert_manifest.json").write_text(json.dumps(
+            {"ok": [], "failed": [{"path": "gfx/a.dds", "ok": False,
+                                   "note": "not a dds (PNG data)"}]}), encoding="utf-8")
         rc = validate.run(self.ws.modsrc, None, self.ws.build, None)
         self.assertEqual(rc, 1)
         data = json.loads((self.ws.build / "validate.json").read_text("utf-8"))
-        self.assertTrue(any("multiple of 4" in p for p in data["problems"]))
+        self.assertEqual(data["mislabeled"], 1)
+        self.assertTrue(any("not a dds (PNG data)" in p for p in data["problems"]))
+
+    def test_skipped_conversion_keeps_the_original_and_is_counted(self):
+        self._minimal_gfx()
+        self.ws.make_png("gfx/b.png")
+        self.ws.build.mkdir(parents=True, exist_ok=True)
+        (self.ws.build / "convert_manifest.json").write_text(json.dumps(
+            {"ok": [], "failed": [{"path": "gfx/b.png", "ok": False,
+                                   "note": "duplicate stem in the same folder"}]}),
+            encoding="utf-8")
+        rc = validate.run(self.ws.modsrc, None, self.ws.build, None)
+        self.assertEqual(rc, 0)
+        data = json.loads((self.ws.build / "validate.json").read_text("utf-8"))
+        self.assertEqual(data["conversion_skipped"], 1)
+        self.assertEqual(data["problems"], [])
 
     def test_bad_fourcc_reported(self):
         self._minimal_gfx()

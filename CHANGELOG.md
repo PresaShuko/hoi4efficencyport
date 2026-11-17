@@ -30,9 +30,25 @@ scaling.
   RAM, free space and the HoI4 install, applies all three and logs the reason
   for each decision; it never turns on Apply changes.
 
-Tests: 274 (was 262), including the merge overlay (later wins, no purge,
-same-size override), `resolve_mods` precedence and the GUI/CLI argv contract
-with several `--mod` flags.
+Diagnostics, after validating a real 44 000-file merge:
+
+- `validate` no longer treats DDS dimensions that are not a multiple of 4 as a
+  problem: vanilla HoI4 ships **11 745 of 21 898** DDS that way (111x106
+  achievements, 500x250 event pictures) and loads them, and reencoded sources
+  keep their size on purpose. On that mod the rule produced **3 664 phantom
+  errors**; it is now a reported count.
+- The real finding behind them: 82 `.dds` files that are not DDS at all (PNG
+  bytes with a dds extension, plus empty files). `convert` names the cause
+  (`not a dds (PNG data), left untouched`) and `validate` lists them.
+- Any `*SpriteType` block now registers its sprite name, not just `spriteType`
+  and `corneredTileSpriteType`, so `textSpriteType` labels are no longer
+  reported as missing GFX (vanilla sprite cache version bumped).
+- Skipped conversions are counted separately ("Conversion skipped, original
+  kept") instead of looking like header problems.
+
+Tests: 280 (was 262), including the merge overlay (later wins, no purge,
+same-size override), `resolve_mods` precedence, the GUI/CLI argv contract with
+several `--mod` flags, sprite block types and the mislabeled-DDS detection.
 
 ## 1.4.0 - 2026-11-17
 

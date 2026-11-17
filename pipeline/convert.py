@@ -80,12 +80,20 @@ def _convert_one(entry: dict, root: Path, cmd: list[str]) -> dict:
                     feed = tdp / f"{src.stem}.png"
                     img.save(feed)
             else:  # reencode of uncompressed dds
+                head = src.open("rb").read(4) if src.is_file() else b""
+                if not head.startswith(b"DDS "):
+                    return {"path": entry["path"], "ok": False,
+                            "note": f"not a dds ({dds.magic_kind(head)}), "
+                                    f"left untouched"}
                 feed = src
             out = tdp / f"{src.stem}.dds"
             r = convert_to_dds(cmd, feed, tdp, fmt, mips=1)
             if r.returncode != 0 or not out.exists():
+                # texconv reports on stdout, not stderr: keep whichever has text.
+                msg = (r.stdout or r.stderr or "").strip().splitlines()
                 return {"path": entry["path"], "ok": False,
-                        "note": f"texconv rc={r.returncode} {r.stderr[-200:]}",
+                        "note": f"texconv rc={r.returncode} "
+                                f"{(msg[-1] if msg else '')[:180]}",
                         "fmt": fmt}
             shutil.copy2(out, target)
             return {

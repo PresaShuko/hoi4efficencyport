@@ -56,6 +56,9 @@ def run(root: Path, workshop: Path | None, out: Path, vanilla: Path | None) -> i
         return cur
 
     checked = 0
+    odd_dims = 0
+    mislabeled: list[str] = []
+    skipped_conv = 0
     unverifiable: list[str] = []
     fourccs: Counter[str] = Counter()
     # one walk of gfx/ feeds both the dds index and the orphan count
@@ -95,9 +98,25 @@ def run(root: Path, workshop: Path | None, out: Path, vanilla: Path | None) -> i
             if hdr["fourcc"] not in dds.UI_FOURCC:
                 problems.append(f"fourcc {hdr['fourcc']}: {m['path']}")
             if hdr["w"] % 4 or hdr["h"] % 4:
-                problems.append(
-                    f"dimensions not a multiple of 4: {m['path']} "
-                    f"({hdr['w']}x{hdr['h']})")
+                # Not a defect: vanilla HoI4 ships thousands of DDS whose
+                # dimensions are not multiples of 4 (111x106 achievements,
+                # 500x250 event pictures) and the engine loads them. Counted
+                # and reported, never a problem.
+                odd_dims += 1
+        # A .dds that is not a DDS (a PNG renamed by the mod, an empty file)
+        # never reaches the header check: it fails conversion. Name it.
+        for m in conv.get("failed", []):
+            p = root / m["path"]
+            if Path(m["path"]).suffix.lower() != ".dds":
+                skipped_conv += 1  # original stays in place: reference still works
+                continue
+            if not p.is_file():
+                continue
+            head = p.open("rb").read(4)
+            if not head.startswith(b"DDS "):
+                mislabeled.append(
+                    f"not a dds ({dds.magic_kind(head)}): {m['path']}")
+        problems.extend(mislabeled)
     else:
         print("convert_manifest.json missing: skipping the DDS header check.")
 
@@ -127,7 +146,9 @@ def run(root: Path, workshop: Path | None, out: Path, vanilla: Path | None) -> i
     lines = [
         f"Validation {scan['generated_at']}",
         f"Converted DDS files verified: {checked} (fourcc: {dict(fourccs)})",
-        f"Header problems: {len(problems)}",
+        f"Header problems: {len(problems)} (not a dds: {len(mislabeled)})",
+        f"DDS not a multiple of 4: {odd_dims} (vanilla ships the same → not an error)",
+        f"Conversion skipped, original kept: {skipped_conv}",
         f"Unverifiable (moved after conversion): {len(unverifiable)}",
         f"Asset paths: {len(scan['references'])} — true missing: "
         f"{len(scan['missing_true'])} — vanilla fallbacks: "
@@ -149,7 +170,8 @@ def run(root: Path, workshop: Path | None, out: Path, vanilla: Path | None) -> i
     (out / "validate_report.txt").write_text(report, encoding="utf-8")
     fsutil.write_json(out / "validate.json", {
         "dds_checked": checked, "fourccs": dict(fourccs),
-        "problems": problems,
+        "problems": problems, "odd_dimensions": odd_dims,
+        "mislabeled": len(mislabeled), "conversion_skipped": skipped_conv,
         "unverifiable": len(unverifiable),
         "missing_true": len(scan["missing_true"]),
         "fallback_vanilla": len(scan["missing_fallback_vanilla"]),

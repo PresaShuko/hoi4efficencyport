@@ -178,6 +178,31 @@ class WriteReportTest(BaseTest):
         self.assertIn("spriteType defined (mod): 1", text)
 
 
+class SpriteBlockTypesTest(BaseTest):
+    def test_every_sprite_block_type_registers_its_name(self):
+        text = (
+            'spriteTypes = {\n'
+            '\tspriteType = { name = "GFX_a" texturefile = "gfx/a.dds" }\n'
+            '\tcorneredTileSpriteType = { name = "GFX_b" texturefile = "gfx/b.dds" }\n'
+            '\ttextSpriteType = { name = "GFX_c" text = "hi" }\n'
+            '\tframeAnimatedSpriteType = { name = "GFX_d" texturefile = "gfx/d.dds" }\n'
+            '}\n')
+        defs = scanner.sprite_defs_in_text(text)
+        self.assertEqual(set(defs), {"GFX_a", "GFX_b", "GFX_c", "GFX_d"})
+        self.assertEqual(defs["GFX_c"]["texturefile"], None)
+        self.assertEqual(defs["GFX_a"]["texturefile"], "gfx/a.dds")
+
+    def test_text_sprite_is_not_reported_missing(self):
+        self.ws.mkdirs("interface")
+        (self.ws.modsrc / "interface" / "t.gfx").write_text(
+            'spriteTypes = { textSpriteType = { name = "GFX_label" text = "x" } }\n',
+            encoding="utf-8")
+        self.ws.write("interface/use.gui",
+                      'guiTypes = { windowType = { name = "w" iconType = { name = "GFX_label" } } }\n')
+        result = scanner.scan(self.ws.modsrc)
+        self.assertIn("GFX_label", result["sprite_types"])
+        self.assertEqual(result["gfx_missing"], [])
+
 class VanillaSpriteCacheTest(BaseTest):
     def setUp(self):
         super().setUp()

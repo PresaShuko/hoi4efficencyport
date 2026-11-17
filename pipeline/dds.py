@@ -12,6 +12,19 @@ UI_FOURCC = frozenset({"DXT1", "DXT3", "DXT5"})
 MODEL_FOURCC = frozenset({"DXT1", "DXT5"})
 
 
+def magic_kind(head: bytes) -> str:
+    """Human name for the first 4 bytes of a file that is not a DDS."""
+    if head.startswith(b"\x89PNG"):
+        return "PNG data"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "JPEG data"
+    if head.startswith(b"BM"):
+        return "BMP data"
+    if not head:
+        return "empty file"
+    return f"magic {head!r}"
+
+
 def read_header(path: Path) -> dict | None:
     """Header fields of a DDS file, or None if the file is not a valid DDS."""
     try:

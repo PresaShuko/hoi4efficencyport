@@ -59,6 +59,30 @@ class FmtForTest(BaseTest):
 
 
 @unittest.skipUnless(TEXCONV, "bundled texconv.exe required (Windows)")
+class MislabeledDdsTest(BaseTest):
+    def test_png_named_dds_is_named_not_sent_to_texconv(self):
+        self.ws.mkdirs("gfx")
+        fake = self.ws.modsrc / "gfx" / "fake.dds"
+        fake.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 40)
+        entry = {"path": "gfx/fake.dds", "action": "reencode", "alpha": "dds",
+                 "bytes": fake.stat().st_size, "cap": 1024}
+        rec = convert._convert_one(entry, self.ws.modsrc, [])
+        self.assertFalse(rec["ok"])
+        self.assertIn("not a dds (PNG data)", rec["note"])
+        self.assertEqual(fake.read_bytes()[:4], b"\x89PNG",
+                         "the mislabeled file must be left untouched")
+
+    def test_empty_dds_is_reported_as_empty(self):
+        self.ws.mkdirs("gfx")
+        empty = self.ws.modsrc / "gfx" / "empty.dds"
+        empty.write_bytes(b"")
+        entry = {"path": "gfx/empty.dds", "action": "reencode", "alpha": "dds",
+                 "bytes": 0, "cap": 1024}
+        rec = convert._convert_one(entry, self.ws.modsrc, [])
+        self.assertFalse(rec["ok"])
+        self.assertIn("empty file", rec["note"])
+
+
 class ConvertOneTest(BaseTest):
     def test_png_converted_opaque_with_cap_and_pad(self):
         self.ws.make_png("gfx/interface/ico.png", w=5, h=3,

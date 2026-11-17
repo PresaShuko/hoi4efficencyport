@@ -21,8 +21,11 @@ from . import fsutil
 QUOTED_RE = re.compile(r'"([^"\r\n]+)"')
 GFX_NAME_RE = re.compile(r"\bGFX_[A-Za-z0-9_]+")
 SUSPECT_RE = re.compile(r"https?:|%|\[|\]")
+# Every declaration that carries a `name` and a texture: spriteType,
+# corneredTileSpriteType, textSpriteType, frameAnimatedSpriteType, ... Any
+# *SpriteType block counts, otherwise text sprites were reported as missing.
 SPRITE_BLOCK_RE = re.compile(
-    r"\b(?:corneredTileSpriteType|spriteType)\s*=\s*\{([^{}]*)\}", re.S | re.I
+    r"\b\w*SpriteType\s*=\s*\{([^{}]*)\}", re.S | re.I
 )
 NAME_RE = re.compile(r'\bname\s*=\s*"([^"]+)"')
 TEXTUREFILE_RE = re.compile(r'texturefile\s*=\s*"([^"]+)"', re.I)
@@ -159,7 +162,7 @@ def sprite_defs(root: Path, subdirs=("interface", "gfx")) -> set[str]:
     return names
 
 
-_SPRITE_CACHE_VERSION = 1
+_SPRITE_CACHE_VERSION = 2
 
 
 def vanilla_sprite_defs(vanilla: Path) -> set[str]:

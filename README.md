@@ -33,22 +33,31 @@ Wine (invoked automatically, disable with `--no-wine`).
 ## GUI
 
 `hoi4port gui` (or `hoi4port-gui.exe`) opens a window over the same pipeline:
-paths with `Sfoglia`/`Rileva`, the ten stages with per-stage status, the global
-`Applica modifiche` switch, the options, and a live log.
+the mods list, the ten stages with per-stage status, the global `Apply changes`
+switch, the options, and a live log.
 
 ![hoi4port GUI](docs/gui.png)
 
-- Every control explains itself on hover: fields, stages, options, buttons.
-- The switch is **off** by default: stages that write stay dry-run, and turning
-  it on asks for confirmation, showing the directory that will be modified.
-- `Auto` reads this PC (logical CPUs, RAM, free space on the staging volume,
-  the HoI4 install) and sets the options that depend on it, logging why; the
-  footer keeps showing the detected profile.
-- `Ctrl+Invio` runs the selected stages, `Esc` cancels the running process
+- **Mods** — any number of folders, in load order. `Add…`, `Remove`, `↑`/`↓`
+  and `Detect installed mods` edit the list; `sync` merges them into one
+  staging tree, and every following stage works on that tree. Merging is
+  file-level, like the game: if two mods ship the same file
+  (`common/national_focus/x.txt`, a `.gfx`, a texture) the later mod replaces
+  it entirely — there is no per-key merge inside a file.
+- **Every control explains itself on hover**: fields, stages, options, buttons.
+- **Apply changes** is off by default: stages that write stay a dry run, and
+  turning it on asks for confirmation showing the folder that will change.
+- **Auto** (options card) detects logical CPUs, RAM, free space on the staging
+  volume and the HoI4 install, then sets `texconv`, `cap` and `cull` — each of
+  them also has its own `auto` checkbox. The detected profile stays in the
+  footer, and every decision is written to the log.
+- `Ctrl+Enter` runs the selected stages, `Esc` cancels the running process
   tree, `Ctrl+L` clears the log, `error.log` runs `check-log` on the game log.
-- Staging/output shown as `…\tail\` are resolved, so a relative `mod_tfr`
-  is never a mystery.
-- The last used paths, options and window size are stored in
+- Staging/output shown as `…\tail\` are resolved, so a relative `mod_tfr` is
+  never a mystery.
+- The window sizes itself to the content and scrolls when the screen is
+  smaller, so nothing is clipped at 100 %, 125 % or 150 % display scaling.
+- The last session (mods, paths, options, window size) is stored in
   `<cache>/gui.json` (`%LOCALAPPDATA%\hoi4port` on Windows).
 
 ## Quickstart

@@ -1,46 +1,44 @@
 # tests/
 
-Suite di test esaustiva per hoi4port (stdlib `unittest`, nessuna dipendenza extra).
+Exhaustive test suite for hoi4port (stdlib `unittest`, no extra dependency).
 
 ```bash
-python tests/run_all.py            # intera suite + riepilogo
-python tests/run_all.py -k cutover # solo i test con "cutover" nell'id
-python tests/smoke.py              # smoke end-to-end (fixture, nessun gioco)
+python tests/run_all.py            # whole suite + summary
+python tests/run_all.py -k cutover # only the tests whose id contains "cutover"
+python tests/smoke.py              # end-to-end smoke (fixture, no game)
 python -m unittest discover -s tests -p "test_*.py"
 ```
 
-I test sono tracciati in git e la CI (`ci.yml`) li esegue su Ubuntu e Windows:
-`run_all.py` per la suite completa, `smoke.py` per l'end-to-end.
+The suite is tracked in git and run by CI (`ci.yml`) on Ubuntu and Windows:
+`run_all.py` for the whole suite, `smoke.py` for the end-to-end pass.
 
-## File
+## Files
 
-| File | Contenuto |
+| File | Content |
 |---|---|
-| `run_all.py` | runner (discovery, filtro `-k`, riepilogo counts) |
-| `_harness.py` | helper condivisi: `Workspace` (temp tree), `crafted_dds`, `MeshBuilder`, `make_scan`, `TEXCONV`/`CMD`, `clean_env`, `run_cli` |
-| `test_fsutil.py` | encoding, JSON, hashing, install stamp, iteratori, sync robocopy, texconv resolution |
-| `test_config.py` | precedenza CLI/env/toml, autodetect Steam (mockato), lettura singola del toml |
-| `test_scanner.py` | riferimenti, sprite, missing/noise/suspect, indici, baseline con stamp |
-| `test_normalize.py` | classificazione, move/repair, rewrite, idempotenza |
-| `test_analyze.py` | classi, caps, alpha (`images.alpha_kind`), dedup, unused, report |
-| `test_dds.py` | header DDS e `alpha_opaque` (equivalenza esatta con Pillow), gate PNG pass-through |
-| `test_convert.py` | padding (`images.pad_to_4`), formati, texconv reale, guards |
-| `test_texfix.py` | header DDS (`dds.read_header`), mips, pow2, fix reali, idempotenza |
-| `test_meshscan.py` | parser .mesh binario, medians, baseline con stamp, report |
-| `test_entityfix.py` | parser entity, ambient, inserimento cull_radius |
-| `test_cutover.py` | rewrite/dedup/guardie, apply, verify |
-| `test_validate.py` | validazione DDS, ledger, orfani, check_log |
-| `test_cli.py` | CLI end-to-end con subprocess (pipeline completa) |
-| `test_descriptor.py` | descriptor generato: parsing, versioni minime, unione tag, sintassi, `sync` end-to-end, `--no-descriptor` |
-| `test_gui.py` | argv per fase validato contro `hoi4port.build_parser()`, severità log, settings persistiti, smoke del widget (skip senza display) |
-| `BUGS.md` | catalogo bug trovati, con evidenza e fix proposti |
-| `TEST_REPORT.md` | report della sessione: risultati, copertura, convenzioni |
+| `run_all.py` | runner (discovery, `-k` filter, counts summary) |
+| `_harness.py` | shared helpers: `Workspace` (temp tree), `crafted_dds`, `MeshBuilder`, `make_scan`, `TEXCONV`/`CMD`, `clean_env`, `run_cli` |
+| `test_fsutil.py` | encoding, JSON, hashing, install stamp, iterators, robocopy sync, texconv resolution |
+| `test_config.py` | CLI/env/toml precedence, Steam autodetect (mocked), single toml read |
+| `test_scanner.py` | references, sprites, missing/noise/suspect, indexes, baseline with stamp |
+| `test_normalize.py` | classification, move/repair, rewrite, idempotence |
+| `test_analyze.py` | classes, caps, alpha (`images.alpha_kind`), dedup, unused, report |
+| `test_dds.py` | DDS headers and `alpha_opaque` (exact equality with Pillow), PNG pass-through gate |
+| `test_convert.py` | padding (`images.pad_to_4`), formats, real texconv, guards |
+| `test_texfix.py` | DDS header (`dds.read_header`), mips, pow2, real fixes, idempotence |
+| `test_meshscan.py` | binary `.mesh` parser, medians, baseline with stamp, report |
+| `test_entityfix.py` | entity parser, ambient, `cull_radius` insertion |
+| `test_cutover.py` | rewrite/dedup/guards, apply, verify |
+| `test_validate.py` | DDS validation, ledger, orphans, descriptor check, `check_log` |
+| `test_descriptor.py` | generated descriptor: parsing, oldest versions, tag union, `replace_path`, syntax, `sync` end-to-end, `--no-descriptor` |
+| `test_cli.py` | CLI end-to-end through subprocess (full pipeline) |
+| `test_gui.py` | per-stage argv validated against `hoi4port.build_parser()`, log severities, persisted settings, widget smoke (skipped without a display) |
 
-## Convenzioni
+## Conventions
 
-- I bug trovati dalla suite sono descritti in `BUGS.md` (tutti risolti):
-  ogni bug ha un test di regressione permanente con ID `BUG-xx` nel commento.
-- Tutto hermetic: directory temporanee per test, Steam/vanilla mockati,
-  subprocess con env pulito + `PYTHONPATH`.
-- I test che invocano il vero `texconv.exe` vengono skippati fuori da Windows
-  (`TEXCONV`/`CMD` da `_harness`).
+- Everything is hermetic: temporary directories per test, Steam/vanilla
+  mocked, subprocesses with a clean environment plus `PYTHONPATH`.
+- Tests that invoke the real `texconv.exe` are skipped outside Windows
+  (`TEXCONV`/`CMD` from `_harness`).
+- Regression tests are named after the bug they cover (`BUG-xx` in the
+  comment) so a fixed defect cannot come back silently.

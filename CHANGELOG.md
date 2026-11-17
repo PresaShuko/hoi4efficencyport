@@ -1,137 +1,101 @@
 # Changelog
 
-## 1.5.0 - 2026-11-17
+## 1.1.0 — 2026-11-17
 
-Merging several mods, an English interface, and a layout that survives DPI
-scaling.
+Merge several mods into one, ship the launcher descriptor the game needs, and
+let `check-log` read the game log for you. The performance and cleanup work of
+the intermediate builds is included here: every 1.x build before this one was
+withdrawn.
 
-- **Multiple mods, merged in `sync`.** `--mod` is repeatable in every command
-  that takes it (`hoi4port sync --mod A --mod B --mod C`), `HOI4PORT_MOD`
-  accepts an `os.pathsep` list and `hoi4port.toml` accepts
-  `mods = ["A", "B"]`. Sources are overlaid in load order into one staging
-  tree: a file present in a later mod replaces the earlier one, exactly like
-  enabling the mods together in the launcher, and a later mod never deletes
-  another mod's files. The descriptor comes from the last mod that has one.
-  `sync --out build` writes `merge_report.json` listing every overridden file
-  per mod. The base mod still uses `robocopy /MIR`; overlays use `/E /IS` so a
-  same-size, same-timestamp file is still copied byte for byte.
-- **Generated descriptor for the merged mod.** After the merge `sync` writes
-  `<staging>/descriptor.mod` and `<staging>.mod` (the file the launcher reads,
-  with `path="mod/<folder>"`): name = the staging folder name, `version` and
-  `supported_version` = the **oldest** among the sources, `tags` = the
-  case-insensitive union of their `tags`/`categories`, `replace_path` = the
-  union of every path the sources declare (separators normalized, trailing
-  slashes and duplicates removed), plus `picture` when a `thumbnail.png` is
-  present. It is written *after* the mirror, so the
-  descriptors copied from the sources cannot overwrite it. `sync
-  --no-descriptor` (or the GUI checkbox) leaves whatever the sources shipped.
-- **Descriptor check in `validate`.** It compares `<staging>.mod` with
-  `descriptor.mod` (name, version, supported_version, tags, replace_path,
-  `path=` presence) and counts state ids shared with vanilla: a launcher file
-  without `replace_path="history/states"` makes vanilla and the mod load
-  together, which is the "State ID conflict" / "Failed to create id … already
-  exists" flood that ends in a crash at load. The launcher `path` is always
-  written absolute (the documented form).
-- **`check-log` classifies the whole log.** One line per class with counts and
-  an example (`State ID conflict`, duplicate id, malformed token, invalid
-  trigger/effect, missing autonomy_state/texture/asset, invalid
-  supported_version), the latest `crashes/hoi4_*` exception, and exit 1 when a
-  load-breaking class is present (`--tail N` for a partial scan).
-- **GUI: mods list.** Ordered list with Add…, Remove, ↑/↓ and "Detect
-  installed mods": the order shown is the load order used by `sync`.
-- **GUI: English.** Every label, tooltip, dialog and log line.
-- **GUI: no more overlapping/clipped widgets.** The content lives in a
-  scrollable canvas and the window is sized from Tk's own request instead of
-  hand-computed pixel constants, so the footer stays inside the window at
-  100 %, 133 % and 150 % scaling; on small screens the page scrolls. The log
-  box is pinned to nine lines (a canvas default height used to stretch it) and
-  the scrollbars are 1 px tall so they cannot inflate their container.
-- **GUI: Auto is real and per field.** `texconv`, `cap` and `cull` each have an
-  `auto` checkbox: texconv = `min(16, max(2, logical CPUs))`, cap = auto from
-  the `.gui` sizes, cull = the CLI default 100. The `Auto` button detects CPU,
-  RAM, free space and the HoI4 install, applies all three and logs the reason
-  for each decision; it never turns on Apply changes.
+### Merging several mods (`sync`)
 
-Diagnostics, after validating a real 44 000-file merge:
+- `--mod` is repeatable in every command that takes it
+  (`hoi4port sync --mod A --mod B --mod C`), `HOI4PORT_MOD` accepts a
+  `os.pathsep` list and `hoi4port.toml` accepts `mods = ["A", "B"]`.
+- Sources are overlaid in load order into one staging tree: a file present in
+  a later mod replaces the earlier one, exactly like enabling the mods together
+  in the launcher, and a later mod never deletes another mod's files. The base
+  mod is mirrored with `robocopy /MIR`; overlays use `/E /IS` so a same-size,
+  same-timestamp file is still copied byte for byte.
+- `sync` writes `merge_report.json` listing every overridden file per mod.
 
-- `validate` no longer treats DDS dimensions that are not a multiple of 4 as a
-  problem: vanilla HoI4 ships **11 745 of 21 898** DDS that way (111x106
-  achievements, 500x250 event pictures) and loads them, and reencoded sources
-  keep their size on purpose. On that mod the rule produced **3 664 phantom
-  errors**; it is now a reported count.
-- The real finding behind them: 82 `.dds` files that are not DDS at all (PNG
-  bytes with a dds extension, plus empty files). `convert` names the cause
-  (`not a dds (PNG data), left untouched`) and `validate` lists them.
-- Any `*SpriteType` block now registers its sprite name, not just `spriteType`
-  and `corneredTileSpriteType`, so `textSpriteType` labels are no longer
-  reported as missing GFX (vanilla sprite cache version bumped).
-- Skipped conversions are counted separately ("Conversion skipped, original
-  kept") instead of looking like header problems.
+### The generated descriptor
 
-Tests: 317 (was 262), including the descriptor generator and its integration
-through `sync`, the merge overlay (later wins, no purge,
-same-size override), `resolve_mods` precedence, the GUI/CLI argv contract with
-several `--mod` flags, sprite block types and the mislabeled-DDS detection.
+After the merge `sync` writes `<staging>/descriptor.mod` **and**
+`<staging>.mod`, the file the launcher actually reads:
 
-## 1.4.0 - 2026-11-17
+| Field | Rule |
+|---|---|
+| `name` | the staging folder name, never the last source's name |
+| `version`, `supported_version` | the **oldest** value among the sources, numeric order (`1.9 < 1.14 < 1.15`, `*` = 0), original spelling kept; `version` falls back to `1.0` and `supported_version` is omitted when no source declares it |
+| `tags` | case-insensitive union of the sources' `tags` and `categories`, first spelling kept |
+| `replace_path` | union of every entry the sources declare, one line each, separators normalized and trailing slashes/duplicates removed |
+| `picture` | `thumbnail.png` when the merged tree has one |
+| `path` | absolute POSIX path of the mod root (the documented form) |
 
-Interfaccia: spiegazioni e rilevamento della macchina.
+The descriptor is written *after* the mirror, so the `descriptor.mod` files
+copied from the sources cannot overwrite it. `sync --no-descriptor` (or the GUI
+checkbox *Generate mod descriptor*) keeps whatever the sources shipped.
 
-- **Tooltip su ogni controllo** (campi, `Sfoglia`/`Rileva`, ognuna delle 10 fasi,
-  interruttore, workers/cap/cull, i quattro flag, Esegui/Annulla/Apri output/
-  error.log, log, barra fasi, pulsante Auto). Ritardo 420 ms, mai in primo piano,
-  posizione limitata allo schermo; i test verificano che nessun controllo resti
-  senza spiegazione e che i testi non siano generici.
-- **Auto**: rileva thread logici, RAM (GlobalMemoryStatusEx), spazio libero sul
-  volume della staging e install vanilla, poi imposta `workers` e vanilla e
-  scrive nel log il motivo di ogni scelta. `workers = min(16, max(2, thread))`
-  perché texconv satura la GPU; il cap resta `auto (.gui)` di proposito.
-- Riga macchina nel footer (`12 thread · 31.8 GB RAM · C: 28 GB liberi`),
-  aggiornata da Auto e al primo avvio.
-- Al primo avvio (nessun `gui.json`) i workers vengono seminati dal profilo
-  della macchina invece del default del CLI; con un file esistente le scelte
-  dell'utente restano intatte.
+Why it matters: a launcher `.mod` without `replace_path` makes vanilla and the
+mod load the same directories. On a real 44 000-file merge that produced
+**505 `State ID conflict`**, **466 `Failed to create id … already exists`** and
+an access violation at load.
 
-## 1.3.0 - 2026-11-17
+### Validation and diagnostics
 
-GUI Tkinter (`hoi4port gui`, `hoi4port-gui`, `hoi4port-gui.exe` windowed): nessuna
-dipendenza nuova, stesso motore del CLI.
+- **`validate` checks the descriptor**: it compares `<staging>.mod` with
+  `descriptor.mod` (name, version, `supported_version`, tags, `replace_path`,
+  presence of `path`) and counts state ids shared with vanilla, naming the
+  missing `replace_path` instead of leaving it to the game log.
+- **`check-log` classifies the whole `error.log`**: one line per error class
+  with counts and an example (`State ID conflict`, duplicate id, malformed
+  token, invalid trigger/effect, missing autonomy_state/texture/asset, invalid
+  `supported_version`), the latest `crashes/hoi4_*` exception, exit code 1 when
+  a load-breaking class is present, `--tail N` for a partial scan.
+- DDS dimensions that are not a multiple of 4 are no longer errors: vanilla
+  HoI4 ships 11 745 of 21 898 that way (111x106 achievements, 500x250 event
+  pictures) and loads them. On the real mod that rule produced 3 664 phantom
+  errors; it is now a reported count.
+- The real finding behind them is reported instead: 82 `.dds` files that are
+  not DDS at all (PNG bytes with a dds extension, plus empty files).
+  `convert` names the cause (`not a dds (PNG data), left untouched`) and
+  `validate` lists them.
+- Any `*SpriteType` block registers its sprite name, not just `spriteType` and
+  `corneredTileSpriteType`, so `textSpriteType` labels are no longer reported
+  as missing GFX.
 
-- Percorsi con `Sfoglia`/`Rileva` (mod, staging, output, vanilla) e percorso
-  risolto mostrato accanto ai campi relativi.
-- Le 10 fasi con stato per fase (`✓ 2.4 s`, `● in corso`, `✗ errore`), tag
-  `scrive`/`legge`, interruttore globale `Applica modifiche` (spento = dry-run)
-  con conferma che mostra la cartella che verrà modificata.
-- Opzioni: workers texconv, cap, cull radius, skip baseline, dedup vanilla,
-  solo-ref, continua dopo un errore.
-- Log live 9 righe con severità (`errori: 0` non è un errore), `Copia`,
-  `Svuota`, scrollbar custom, word-wrap; barra fasi, `Annulla` (kill del process
-  tree), `Apri output`, `error.log` (`check-log`).
-- Scorciatoie: `Ctrl+Invio` esegue, `Esc` annulla, `Ctrl+L` pulisce il log.
-- Stato dell'ultima sessione in `<cache>/hoi4port/gui.json`.
-- Build: `hoi4port-gui.exe` con `--windowed`; in esecuzione congelata la GUI
-  rilancia sé stessa con il flag nascosto `--cli` (isolamento dei crash e
-  cancellazione affidabile), mentre da checkout usa `python -m hoi4port`.
-- `hoi4port.build_parser()` estratto: un test verifica che **ogni** argv
-  generato dalla GUI sia accettato dal parser vero (ha trovato subito
-  `convert`/`texfix` che non accettano `--vanilla`).
-- `fsutil.cache_dir()` condivisa (prima privata in `scanner`).
+### GUI
 
-Correzioni:
+`hoi4port gui` / `hoi4port-gui.exe`, no new dependency, same engine as the CLI.
 
-- `sync`: l'output di robocopy (riepilogo localizzato) viene decodificato con la
-  code page OEM invece che UTF-8, quindi "Velocità"/"Terminato" non diventano
-  più "Velocit?". Regressione coperta da un test.
+- Mods list (any number, load order) with `Add…`, `Remove`, `↑`/`↓` and
+  `Detect installed mods`; the ten stages with per-stage status (`✓ 2.4 s`,
+  `● running`, `✗ error`) and `writes`/`reads` tags; global `Apply changes`
+  switch (off = dry run, turning it on asks which folder will change).
+- Options: texconv workers, cap, cull radius, skip baseline, vanilla dedup,
+  reference-repair only, continue after an error, generate descriptor.
+- English interface, a tooltip on every control (420 ms, never topmost,
+  clamped to the screen), a nine-line live log with severities, `Copy`,
+  `Clear`, phase bar, `Cancel` (kills the process tree), `Open output`,
+  `error.log` (runs `check-log`).
+- `Auto` is real and per field: `texconv = min(16, max(2, logical CPUs))`,
+  `cap` from the `.gui` sizes, `cull` = 100. The `Auto` button detects CPU, RAM,
+  free space and the HoI4 install, applies all three and logs the reason for
+  each decision; it never turns on `Apply changes`.
+- Layout is computed from Tk's own request inside a scrollable canvas: no
+  clipped or overlapping widget at 100 %, 133 % and 150 % display scaling.
+- Shortcuts: `Ctrl+Enter` runs, `Esc` cancels, `Ctrl+L` clears the log. The
+  last session (mods, paths, options, window size) lives in
+  `<cache>/hoi4port/gui.json`.
+- A test feeds every argv the window generates through the real
+  `hoi4port.build_parser()`.
 
-Test: 254 (erano 229).
+### Performance
 
-## 1.2.0 — 2026-11-16
-
-Performance release. **Every produced file is byte-identical** to 1.1.0: the
-whole pipeline was run old-vs-new on the same mod and every staging file,
-`asset_plan.json`, `scan.json`, `mesh_stats.json` and `validate.json`
-compared equal; `convert`/`texfix` outputs were compared byte by byte,
-including the format choice.
+Every produced file is byte-identical to the previous build; the whole pipeline
+was run old-vs-new on the same mod and every staging file, `asset_plan.json`,
+`scan.json`, `mesh_stats.json` and `validate.json` compared equal.
 
 Measured on a synthetic mod (700 text files / 128k lines, 160 textures =
 42.2 MB, 150 meshes, 600 vanilla `.gfx`; Windows 11, Python 3.13):
@@ -145,83 +109,45 @@ Measured on a synthetic mod (700 text files / 128k lines, 160 textures =
 | `texfix` on a 512² raw DDS | 389 ms | **41 ms** (−89%) |
 | `import hoi4port` (fresh process) | 150 ms | **87 ms** (−42%) |
 
-How (all output-preserving):
+How (all output-preserving): one `scandir` walk builds an existence index and
+reference tokens resolve by set lookup instead of one `stat()` per token; one
+split per file plus a per-line comment fast path; vanilla sprite names cached
+per install stamp; `dds.alpha_opaque` decides BC1/BC3 alpha from the pixel
+bytes (0.8 ms instead of a 330 ms Pillow decode); raw DDS and 8-bit PNGs that
+need no resize go to texconv without a decode/PNG round trip; pipeline modules
+are imported per subcommand.
 
-- `scanner`: one scandir walk builds an existence index; reference tokens are
-  resolved by set lookup instead of one `stat()` per token (`Path.exists()`
-  costs ~20 µs on Windows). Entity-relative resolution is indexed too;
-  absolute paths, `..`, padded cases still use the real `stat()`.
-- `scanner`: one split per file plus per-line comment fast path, string
-  suffix checks instead of `Path(...).suffix`, and lines without a quote or
-  `GFX_` skip the corresponding regex.
-- `scanner`: vanilla spriteType names cached per install stamp
-  (`<cache>/hoi4port/vanilla_sprites_v1_<stamp>.json`; cache directory is
-  `%LOCALAPPDATA%`, `$XDG_CACHE_HOME` or `~/Library/Caches`). Disabled when
-  the install has no `launcher-settings.json`.
-- `fsutil`: `iter_files` and `tree_size` use `os.scandir` (16–27× faster than
-  `rglob`+`stat`); directory symlinks are not followed, like `Path.rglob`.
-- `dds.alpha_opaque`: exact BC1/BC3 alpha decision for uncompressed 32-bit
-  DDS read from the pixel bytes (0.8 ms instead of a 330 ms Pillow decode).
-  It returns None for compressed/exotic/padded files, so the old path is
-  used there; a differential test asserts the same answer as Pillow.
-- `texfix`: raw DDS that needs no resize is fed to texconv directly (no
-  Pillow decode, no PNG round-trip); format/mips unchanged.
-- `convert`: 8-bit RGB/RGBA PNGs that need no resize/padding are fed to
-  texconv directly instead of being decoded and re-saved.
-- CLI: pipeline modules are imported per subcommand (PIL no longer loaded for
-  `sync`, `scan`, ...).
-- `analyze`: size comes from the bytes already read (no extra `stat`).
+### Internal cleanup
 
-## 1.1.0 — 2026-11-16
+- One DDS header reader (`pipeline/dds.py`), one Pillow helper
+  (`pipeline/images.py`) and one thread-pool/texconv layer
+  (`pipeline/parallel.py`, `tools.convert_to_dds`/`decode_to_png`) replace
+  three header parsers, two `alpha_kind` copies, two padding implementations
+  and the duplicated convert/texfix loops.
+- One scan-index API and one convention-folder constant replace four copied
+  index builders and five policy tuples; report counts come from a single
+  `summary()` per module.
+- `config` reads at most one `hoi4port.toml` per command; `texfix` reuses the
+  plan it already computed; `analyze` reads each texture once for both the
+  decode and the dedup hash; `meshscan` no longer copies one `bytes` object per
+  token.
+- `vanilla_hash.json` and `vanilla_mesh_stats.json` carry an install `stamp`
+  (content hash of `launcher-settings.json`): a game update invalidates the
+  cache instead of leaving stale hashes and medians behind, and old files are
+  detected with a note.
+- Dead code removed (unused constants/imports, unreachable branches,
+  duplicated `events/` rule, no-op guards, local imports). `--help` documents
+  all commands.
+- The functional suite is tracked in git and executed by CI on Ubuntu and
+  Windows (`run_all.py` + `smoke.py`); `run_all.py -k <substring>` works as
+  documented.
 
-Internal cleanup release: no pipeline behaviour change, but three
-compatibility notes.
-
-- **Breaking**: `sync` no longer accepts `--out` (it never used it; the flag
-  was silently ignored). Every other command is unchanged.
-- **Breaking**: `vanilla_hash.json` and `vanilla_mesh_stats.json` now carry a
-  `stamp` (content hash of the install's `launcher-settings.json`) and the
-  vanilla hashes live under `hashes`. Old files are detected: `analyze`
-  prints a note and skips vanilla dedup until the next full `scan`; baselines
-  are recomputed automatically. A game update now invalidates the cache
-  instead of leaving stale hashes/medians behind.
-- Removed the unused `cutover.run(..., workshop)` parameter and the dead
-  parse field `start`.
-
-Cleanup:
-
-- One DDS header reader (`pipeline/dds.py`) and one Pillow helper module
-  (`pipeline/images.py`) replace three header parsers, two `alpha_kind`
-  copies and two padding implementations.
-- One thread-pool runner (`pipeline/parallel.py`) and one texconv invocation
-  layer (`tools.convert_to_dds`/`decode_to_png`) replace the duplicated
-  convert/texfix loops.
-- One scan-index API (`scanner.index_by_token`, `index_by_token_lower`,
-  `sprites_by_texture`) and one convention-folder constant replace four
-  copied index builders and five policy tuples.
-- Counts for the reports and the CLI come from a single `summary()` per
-  module (scan, analyze, meshscan) instead of being recomputed in two places.
-- `config`: at most one `hoi4port.toml` read per command (was up to four).
-- `texfix` uses the plan it already computed (no second header read per
-  texture); `scan` parses each quoted line once (the regex ran twice).
-- `analyze` reads each texture once for both the Pillow decode and the
-  dedup hash; `meshscan` no longer copies one `bytes` object per parsed
-  token and its docstring no longer claims streaming.
-- Dead code removed: unused constants/imports, unreachable branches,
-  duplicated `events/` classification rule, `if not base` guard, no-op
-  `.replace("\\", "/")` after `as_posix()`, no-op `direct if ... else`
-  ternary, local imports.
-- `--help` now documents all 11 commands (it listed 2).
-- Test harness: shared `make_scan`, `TEXCONV`/`CMD`, `clean_env`;
-  `run_all.py -k <substring>` implemented as documented; tautological
-  mip test removed.
-- The functional suite (`tests/`) is now tracked in git and executed by CI
-  (`run_all.py` + `smoke.py`) instead of being ignored via `.git/info/exclude`.
+Tests: **317**.
 
 ## 1.0.1 — 2026-10-03
 
-Bug-fix release from the first exhaustive test session (suite: 206 tests,
-all green — see `tests/TEST_REPORT.md` and `tests/BUGS.md`).
+Bug-fix release from the first exhaustive test session (suite: 206 tests, all
+green).
 
 - **Critical**: `cutover --apply` deleted freshly re-encoded `.dds` files
   (they were listed as "converted sources" in `convert_manifest.json`), and

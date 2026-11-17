@@ -46,8 +46,9 @@ switch, the options, and a live log.
   it entirely — there is no per-key merge inside a file.
 - **Generated descriptor**: after the merge the window writes
   `<staging>.mod` + `descriptor.mod` (name from the staging folder, oldest
-  `supported_version` of the sources, combined tags and `replace_path`). Uncheck
-  *Generate mod descriptor* to keep the sources' own files.
+  `supported_version` of the sources, combined tags and `replace_path`, and the
+  absolute path of the mod root). Uncheck *Generate mod descriptor* to keep the
+  sources' own files.
 - **Every control explains itself on hover**: fields, stages, options, buttons.
 - **Apply changes** is off by default: stages that write stay a dry run, and
   turning it on asks for confirmation showing the folder that will change.
@@ -71,9 +72,10 @@ hoi4port sync --mod 3350890356     # Workshop ID or path -> ./mod_tfr staging
 hoi4port sync --mod 3350890356 --mod D:/mods/patch   # merged, patch wins
 hoi4port sync --mod A --mod B --no-descriptor        # keep the sources' descriptors
 hoi4port scan                      # references, missing sprites, baseline
+hoi4port validate                  # descriptor + assets; run it before launching
 hoi4port meshscan                  # mesh metrics (vertices, materials, collision)
 hoi4port texfix --apply            # full mip chain + DXT1/DXT5 model textures
-hoi4port validate                  # final checks (exit != 0 on problems)
+hoi4port check-log                 # what the last game session complained about
 ```
 
 Persistent configuration: `hoi4port.toml` (see `hoi4port.example.toml`) in
@@ -144,6 +146,16 @@ no-op (idempotent).
   (Linux `$XDG_CACHE_HOME/hoi4port`, macOS `~/Library/Caches/hoi4port`),
   keyed by a hash of the install's `launcher-settings.json`; a game update
   invalidates it automatically. Deleting the folder is always safe.
+
+## Development
+
+```bash
+python tests/run_all.py    # 317 tests, stdlib only
+python tests/smoke.py      # end-to-end on the fixture mod
+```
+
+CI runs both on Ubuntu and Windows (Python 3.11 and 3.13) and builds the wheel,
+the CLI executable and the windowed GUI executable; see `tests/README.md`.
 
 ## License
 

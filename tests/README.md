@@ -31,6 +31,7 @@ I test sono tracciati in git e la CI (`ci.yml`) li esegue su Ubuntu e Windows:
 | `test_cutover.py` | rewrite/dedup/guardie, apply, verify |
 | `test_validate.py` | validazione DDS, ledger, orfani, check_log |
 | `test_cli.py` | CLI end-to-end con subprocess (pipeline completa) |
+| `test_descriptor.py` | descriptor generato: parsing, versioni minime, unione tag, sintassi, `sync` end-to-end, `--no-descriptor` |
 | `test_gui.py` | argv per fase validato contro `hoi4port.build_parser()`, severità log, settings persistiti, smoke del widget (skip senza display) |
 | `BUGS.md` | catalogo bug trovati, con evidenza e fix proposti |
 | `TEST_REPORT.md` | report della sessione: risultati, copertura, convenzioni |

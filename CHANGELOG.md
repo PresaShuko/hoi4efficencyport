@@ -15,6 +15,14 @@ scaling.
   `sync --out build` writes `merge_report.json` listing every overridden file
   per mod. The base mod still uses `robocopy /MIR`; overlays use `/E /IS` so a
   same-size, same-timestamp file is still copied byte for byte.
+- **Generated descriptor for the merged mod.** After the merge `sync` writes
+  `<staging>/descriptor.mod` and `<staging>.mod` (the file the launcher reads,
+  with `path="mod/<folder>"`): name = the staging folder name, `version` and
+  `supported_version` = the **oldest** among the sources, `tags` = the
+  case-insensitive union of their `tags`/`categories`, plus `picture` when a
+  `thumbnail.png` is present. It is written *after* the mirror, so the
+  descriptors copied from the sources cannot overwrite it. `sync
+  --no-descriptor` (or the GUI checkbox) leaves whatever the sources shipped.
 - **GUI: mods list.** Ordered list with Add…, Remove, ↑/↓ and "Detect
   installed mods": the order shown is the load order used by `sync`.
 - **GUI: English.** Every label, tooltip, dialog and log line.
@@ -46,7 +54,8 @@ Diagnostics, after validating a real 44 000-file merge:
 - Skipped conversions are counted separately ("Conversion skipped, original
   kept") instead of looking like header problems.
 
-Tests: 280 (was 262), including the merge overlay (later wins, no purge,
+Tests: 303 (was 262), including the descriptor generator and its integration
+through `sync`, the merge overlay (later wins, no purge,
 same-size override), `resolve_mods` precedence, the GUI/CLI argv contract with
 several `--mod` flags, sprite block types and the mislabeled-DDS detection.
 

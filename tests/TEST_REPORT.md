@@ -57,6 +57,12 @@ regole in `classify_token`, emerso correggendo BUG-06).
 > `test_config.ResolveModsTest` (ordine CLI, lista in env, array TOML,
 > precedenza CLI>env). Aggiornati i test GUI per la lista dei mod e per le
 > opzioni auto per campo.
+>
+> **Aggiornamento 1.5.0-b (2026-11-17)**: **303 test**. Nuovo
+> `test_descriptor.py` (23): parsing Clausewitz, ordinamento versioni numerico
+> (`1.9 < 1.14 < 1.15`), unione tag case-insensitive, sintassi del file,
+> `path` relativo dentro `mod/`, scrittura di entrambi i file con il nome della
+> cartella, `--no-descriptor` che lascia il descriptor copiato dalle mod.
 
 ## Come rieseguire
 

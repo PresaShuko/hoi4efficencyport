@@ -80,6 +80,7 @@ class Opts:
     vanilla_dedup: bool = False
     no_moves: bool = False
     continue_on_error: bool = False
+    descriptor: bool = True
     tail: str = "5000"
 
 
@@ -112,7 +113,10 @@ def stage_command(name: str, o: Opts, prefix: list[str] | None = None) -> list[s
         for mod in o.mods:
             cmd += ["--mod", abs_path(mod)]
         # --out receives merge_report.json when more than one mod is merged.
-        return cmd + ["--staging", stg, "--out", out]
+        cmd += ["--staging", stg, "--out", out]
+        if not o.descriptor:
+            cmd += ["--no-descriptor"]
+        return cmd
     cmd += ["--staging", stg, "--out", out]
     if van and name in VANILLA_STAGES:
         cmd += ["--vanilla", van]
@@ -299,6 +303,7 @@ class Settings:
     vanilla_dedup: bool = False
     no_moves: bool = False
     continue_on_error: bool = False
+    descriptor: bool = True
     stages: list[str] = field(default_factory=lambda: list(STAGE_NAMES))
     geometry: str = ""
 
@@ -412,6 +417,10 @@ TOOLTIPS = {
     "vanilla_dedup": "Adds removal of files identical to vanilla to cutover. "
                      "Off by default: the per-file fallback is unreliable when "
                      "the file carries flags or bookmarks.",
+    "descriptor": "After the merge, write <staging>.mod and descriptor.mod with "
+                  "the staging folder as name, the oldest supported_version of "
+                  "the sources, and their combined tags. Turn off to keep "
+                  "whatever descriptor the sources shipped.",
     "no_moves": "normalize rewrites references only, without reordering the "
                 "asset folders.",
     "continue": "Does not stop the pipeline on the first error. Useful for a "
@@ -698,6 +707,7 @@ class App:
         self.v_vdedup = tk.BooleanVar(value=s.vanilla_dedup)
         self.v_nomoves = tk.BooleanVar(value=s.no_moves)
         self.v_cont = tk.BooleanVar(value=s.continue_on_error)
+        self.v_desc = tk.BooleanVar(value=s.descriptor)
         chosen = set(s.stages) if s.stages else set(STAGE_NAMES)
         self.v_stage = {n: tk.BooleanVar(value=n in chosen) for n in STAGE_NAMES}
 
@@ -987,7 +997,8 @@ class App:
             Tooltip(h, TOOLTIPS[key])
             auto_var.trace_add("write", lambda *_a: self._sync_auto_states())
         tk.Frame(b, bg=C["border"], height=1).pack(fill="x", pady=7)
-        for text, var, key in (("Skip vanilla baseline", self.v_skipvan, "skip_vanilla"),
+        for text, var, key in (("Generate mod descriptor", self.v_desc, "descriptor"),
+                               ("Skip vanilla baseline", self.v_skipvan, "skip_vanilla"),
                                ("Vanilla dedup", self.v_vdedup, "vanilla_dedup"),
                                ("Reference repair only", self.v_nomoves, "no_moves"),
                                ("Continue after an error", self.v_cont, "continue")):
@@ -1124,7 +1135,8 @@ class App:
             skip_vanilla=bool(self.v_skipvan.get()),
             vanilla_dedup=bool(self.v_vdedup.get()),
             no_moves=bool(self.v_nomoves.get()),
-            continue_on_error=bool(self.v_cont.get()))
+            continue_on_error=bool(self.v_cont.get()),
+            descriptor=bool(self.v_desc.get()))
 
     def collect_settings(self) -> Settings:
         s = Settings(mods=list(self.mods), staging=self.v_stg.get().strip(),
@@ -1139,6 +1151,7 @@ class App:
                      vanilla_dedup=bool(self.v_vdedup.get()),
                      no_moves=bool(self.v_nomoves.get()),
                      continue_on_error=bool(self.v_cont.get()),
+                     descriptor=bool(self.v_desc.get()),
                      stages=[n for n in STAGE_NAMES if self.v_stage[n].get()])
         try:
             s.geometry = self.root.winfo_geometry()

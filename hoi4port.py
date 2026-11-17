@@ -72,6 +72,21 @@ def cmd_sync(args) -> int:
         cfg.out.mkdir(parents=True, exist_ok=True)
         fsutil.write_json(cfg.out / "merge_report.json", report)
         print(f"Merge report: {cfg.out / 'merge_report.json'}")
+
+    # After the merge: the sources' own descriptors are already copied, so the
+    # generated one must come last or it would be overwritten.
+    from pipeline import descriptor
+
+    info = descriptor.write_for_staging(cfg.staging, list(mods),
+                                       enabled=not args.no_descriptor)
+    if info["written"]:
+        tags = ", ".join(info["tags"]) or "none"
+        print(f"Descriptor: {cfg.staging.name}.mod + descriptor.mod "
+              f"(name \"{info['name']}\", version {info['version']}, "
+              f"supported_version {info['supported_version'] or '-'}, "
+              f"tags: {tags})")
+    elif info.get("reason") != "disabled":
+        print(f"Descriptor not written: {info.get('reason')}", file=sys.stderr)
     return 0
 
 
@@ -267,6 +282,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_sync = sub.add_parser("sync", help="mirror one or more mods -> staging")
     add_common(p_sync)
+    p_sync.add_argument("--no-descriptor", action="store_true",
+                        help="do not regenerate <staging>.mod and "
+                             "descriptor.mod after the merge")
     p_sync.set_defaults(fn=cmd_sync)
 
     p_scan = sub.add_parser("scan", help="scan asset references and sprites")

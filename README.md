@@ -44,6 +44,10 @@ switch, the options, and a live log.
   file-level, like the game: if two mods ship the same file
   (`common/national_focus/x.txt`, a `.gfx`, a texture) the later mod replaces
   it entirely — there is no per-key merge inside a file.
+- **Generated descriptor**: after the merge the window writes
+  `<staging>.mod` + `descriptor.mod` (name from the staging folder, oldest
+  `supported_version` of the sources, combined tags). Uncheck
+  *Generate mod descriptor* to keep the sources' own files.
 - **Every control explains itself on hover**: fields, stages, options, buttons.
 - **Apply changes** is off by default: stages that write stay a dry run, and
   turning it on asks for confirmation showing the folder that will change.
@@ -65,6 +69,7 @@ switch, the options, and a live log.
 ```bash
 hoi4port sync --mod 3350890356     # Workshop ID or path -> ./mod_tfr staging
 hoi4port sync --mod 3350890356 --mod D:/mods/patch   # merged, patch wins
+hoi4port sync --mod A --mod B --no-descriptor        # keep the sources' descriptors
 hoi4port scan                      # references, missing sprites, baseline
 hoi4port meshscan                  # mesh metrics (vertices, materials, collision)
 hoi4port texfix --apply            # full mip chain + DXT1/DXT5 model textures

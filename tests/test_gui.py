@@ -195,7 +195,8 @@ class TooltipCoverageTest(GuiBase):
 
     REQUIRED = {"mods", "add_mod", "remove_mod", "up", "down", "staging", "out",
                 "vanilla", "browse", "detect", "apply", "workers", "cap", "cull",
-                "skip_vanilla", "vanilla_dedup", "no_moves", "continue", "run",
+                "skip_vanilla", "vanilla_dedup", "no_moves", "continue",
+                "descriptor", "run",
                 "cancel", "open_out", "diag", "copy", "clear", "log", "bar",
                 "auto", "pc"}
 

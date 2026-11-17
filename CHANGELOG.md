@@ -19,8 +19,10 @@ scaling.
   `<staging>/descriptor.mod` and `<staging>.mod` (the file the launcher reads,
   with `path="mod/<folder>"`): name = the staging folder name, `version` and
   `supported_version` = the **oldest** among the sources, `tags` = the
-  case-insensitive union of their `tags`/`categories`, plus `picture` when a
-  `thumbnail.png` is present. It is written *after* the mirror, so the
+  case-insensitive union of their `tags`/`categories`, `replace_path` = the
+  union of every path the sources declare (separators normalized, trailing
+  slashes and duplicates removed), plus `picture` when a `thumbnail.png` is
+  present. It is written *after* the mirror, so the
   descriptors copied from the sources cannot overwrite it. `sync
   --no-descriptor` (or the GUI checkbox) leaves whatever the sources shipped.
 - **GUI: mods list.** Ordered list with Add…, Remove, ↑/↓ and "Detect
@@ -54,7 +56,7 @@ Diagnostics, after validating a real 44 000-file merge:
 - Skipped conversions are counted separately ("Conversion skipped, original
   kept") instead of looking like header problems.
 
-Tests: 303 (was 262), including the descriptor generator and its integration
+Tests: 308 (was 262), including the descriptor generator and its integration
 through `sync`, the merge overlay (later wins, no purge,
 same-size override), `resolve_mods` precedence, the GUI/CLI argv contract with
 several `--mod` flags, sprite block types and the mislabeled-DDS detection.

@@ -46,7 +46,7 @@ switch, the options, and a live log.
   it entirely — there is no per-key merge inside a file.
 - **Generated descriptor**: after the merge the window writes
   `<staging>.mod` + `descriptor.mod` (name from the staging folder, oldest
-  `supported_version` of the sources, combined tags). Uncheck
+  `supported_version` of the sources, combined tags and `replace_path`). Uncheck
   *Generate mod descriptor* to keep the sources' own files.
 - **Every control explains itself on hover**: fields, stages, options, buttons.
 - **Apply changes** is off by default: stages that write stay a dry run, and

@@ -419,8 +419,8 @@ TOOLTIPS = {
                      "the file carries flags or bookmarks.",
     "descriptor": "After the merge, write <staging>.mod and descriptor.mod with "
                   "the staging folder as name, the oldest supported_version of "
-                  "the sources, and their combined tags. Turn off to keep "
-                  "whatever descriptor the sources shipped.",
+                  "the sources, their combined tags and every replace_path. "
+                  "Turn off to keep whatever descriptor the sources shipped.",
     "no_moves": "normalize rewrites references only, without reordering the "
                 "asset folders.",
     "continue": "Does not stop the pipeline on the first error. Useful for a "

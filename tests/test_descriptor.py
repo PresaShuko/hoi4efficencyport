@@ -31,6 +31,17 @@ class ParseTest(BaseTest):
             'tags={ "Gameplay" "Map" }\ncategories={ "gameplay" "Graphics" }\n')
         self.assertEqual(d.tags, ("Gameplay", "Map", "Graphics"))
 
+    def test_replace_path_repeats_block_and_normalization(self):
+        d = descriptor.parse_descriptor(
+            'name="X"\n'
+            'replace_path="common/ai_strategy"\n'
+            'replace_path="history/states"\n'
+            'replace_path="Common\\Ai_Strategy\\"\n'
+            'replace_path={ "common/decisions" "history/states" }\n')
+        self.assertEqual(d.replace_paths,
+                         ("common/ai_strategy", "history/states",
+                          "common/decisions"))
+
     def test_missing_file_is_an_empty_descriptor(self):
         d = descriptor.parse_descriptor("")
         self.assertEqual((d.name, d.version, d.supported_version, d.tags),
@@ -51,6 +62,19 @@ class VersionTest(BaseTest):
 
     def test_unparsable_version_sorts_oldest(self):
         self.assertEqual(descriptor.oldest(["1.15", "beta"]), "beta")
+
+
+class ReplacePathTest(BaseTest):
+    def test_union_is_case_insensitive_after_normalizing(self):
+        a = descriptor.Descriptor(replace_paths=("common/ai_strategy",))
+        b = descriptor.Descriptor(replace_paths=("Common/Ai_Strategy/",
+                                                 "history/states"))
+        self.assertEqual(descriptor.merge_replace_paths([a, b]),
+                         ("common/ai_strategy", "history/states"))
+
+    def test_empty_values_are_dropped(self):
+        self.assertEqual(descriptor.dedupe_paths(["", "/", "  ", "a/b"]),
+                         ("a/b",))
 
 
 class TagsTest(BaseTest):
@@ -77,6 +101,17 @@ class RenderTest(BaseTest):
             '}\n'
             'name="provatfrunito"\n'
             'supported_version="1.12.14"\n'))
+
+    def test_replace_path_lines(self):
+        text = descriptor.render("m", version="1", supported_version="1.15.*",
+                                 replace_paths=("common/ai_strategy",
+                                                "history/states"))
+        self.assertEqual(text, (
+            'version="1"\n'
+            'name="m"\n'
+            'supported_version="1.15.*"\n'
+            'replace_path="common/ai_strategy"\n'
+            'replace_path="history/states"\n'))
 
     def test_launcher_file_adds_the_path(self):
         text = descriptor.render("m", version="1", supported_version="1.15.*",
@@ -137,6 +172,22 @@ class WriteTest(BaseTest):
         self.assertEqual(inner.path, "")
         self.assertEqual(outer.path, "mod/provatfrunito")
 
+    def test_replace_paths_are_unioned_into_both_files(self):
+        a = self.source("one", 'name="One"\n'
+                               'replace_path="common/ai_strategy"\n')
+        b = self.source("two", 'name="Two"\n'
+                               'replace_path="history/states"\n'
+                               'replace_path="common/ai_strategy"\n')
+        staging = self.ws.root / "mod" / "provatfrunito"
+        staging.mkdir(parents=True)
+        descriptor.write_for_staging(staging, [a, b])
+        for path in (staging / "descriptor.mod",
+                     staging.parent / "provatfrunito.mod"):
+            parsed = descriptor.parse_descriptor(
+                path.read_text(encoding="utf-8"))
+            self.assertEqual(parsed.replace_paths,
+                             ("common/ai_strategy", "history/states"), path.name)
+
     def test_thumbnail_is_referenced_when_present(self):
         a = self.source("one", 'name="One"\n')
         staging = self.ws.root / "stg"
@@ -180,9 +231,11 @@ class SyncIntegrationTest(BaseTest):
 
     def test_sync_generates_and_reports_the_descriptor(self):
         a = self._mod("one", 'tags={ "Gameplay" }\nname="One"\n'
-                              'supported_version="1.19.4"\n')
+                              'supported_version="1.19.4"\n'
+                              'replace_path="common/ai_strategy"\n')
         b = self._mod("two", 'tags={ "Map" "Gameplay" }\nname="Two"\n'
-                              'supported_version="1.12.14"\n')
+                              'supported_version="1.12.14"\n'
+                              'replace_path="history/states"\n')
         staging = self.ws.root / "mod" / "provatfrunito"
         rc, out, err = run_cli("sync", "--mod", str(a), "--mod", str(b),
                                "--staging", str(staging),
@@ -196,6 +249,8 @@ class SyncIntegrationTest(BaseTest):
         self.assertEqual(parsed.name, "provatfrunito")
         self.assertEqual(parsed.supported_version, "1.12.14")
         self.assertEqual(parsed.tags, ("Gameplay", "Map"))
+        self.assertEqual(parsed.replace_paths,
+                         ("common/ai_strategy", "history/states"))
 
     def test_no_descriptor_keeps_the_copied_one(self):
         a = self._mod("one", 'name="One"\nsupported_version="1.19.4"\n')

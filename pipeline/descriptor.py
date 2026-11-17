@@ -13,7 +13,9 @@ Field rules:
 - ``supported_version`` = the **oldest** supported_version among the sources,
 - ``version`` = the oldest ``version`` among the sources (``1.0`` if none),
 - ``tags`` = union of the sources' ``tags`` and ``categories``, deduplicated
-  case-insensitively, in the order they were first seen.
+  case-insensitively, in the order they were first seen,
+- ``replace_path`` = union of every ``replace_path`` the sources declare, one
+  line each, deduplicated case-insensitively after normalizing separators.
 
 Nothing here reads the game: it only parses what the sources already declare.
 """
@@ -29,6 +31,7 @@ from . import fsutil
 DEFAULT_VERSION = "1.0"
 
 _SCALAR_RE = re.compile(r'(?m)^\s*([A-Za-z_]\w*)\s*=\s*"([^"]*)"')
+_REPLACE_RE = re.compile(r'(?m)^\s*replace_path\s*=\s*"([^"]*)"', re.I)
 _BLOCK_RE = re.compile(r'([A-Za-z_]\w*)\s*=\s*\{([^}]*)\}')
 _QUOTED_RE = re.compile(r'"([^"]+)"')
 TAG_BLOCKS = ("tags", "categories")
@@ -40,6 +43,7 @@ class Descriptor:
     version: str = ""
     supported_version: str = ""
     tags: tuple[str, ...] = ()
+    replace_paths: tuple[str, ...] = ()
     picture: str = ""
     path: str = ""
     remote_file_id: str = ""
@@ -59,11 +63,18 @@ def parse_descriptor(text: str) -> Descriptor:
                     tags.append(tag)
     for key, value in _SCALAR_RE.findall(text):
         scalars.setdefault(key.lower(), value)
+    replace_paths: list[str] = []
+    for value in _REPLACE_RE.findall(text):
+        replace_paths.append(value)
+    for key, body in _BLOCK_RE.findall(text):
+        if key.lower() == "replace_path":
+            replace_paths.extend(_QUOTED_RE.findall(body))
     return Descriptor(
         name=scalars.get("name", ""),
         version=scalars.get("version", ""),
         supported_version=scalars.get("supported_version", ""),
         tags=tuple(tags),
+        replace_paths=dedupe_paths(replace_paths),
         picture=scalars.get("picture", ""),
         path=scalars.get("path", ""),
         remote_file_id=scalars.get("remote_file_id", ""),
@@ -93,6 +104,28 @@ def oldest(values: Iterable[str]) -> str:
     return min(cleaned, key=version_key)
 
 
+def normalize_path(value: str) -> str:
+    """Engine paths: forward slashes, no trailing separator."""
+    return value.replace("\\", "/").strip().rstrip("/")
+
+
+def dedupe_paths(values: Iterable[str]) -> tuple[str, ...]:
+    """Union of replace_path values, case-insensitive, first spelling kept."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        path = normalize_path(value)
+        key = path.casefold()
+        if path and key not in seen:
+            seen.add(key)
+            out.append(path)
+    return tuple(out)
+
+
+def merge_replace_paths(descriptors: Iterable[Descriptor]) -> tuple[str, ...]:
+    return dedupe_paths(p for d in descriptors for p in d.replace_paths)
+
+
 def merge_tags(descriptors: Iterable[Descriptor]) -> tuple[str, ...]:
     """Union of tags/categories, deduplicated case-insensitively, ordered."""
     seen: set[str] = set()
@@ -119,13 +152,16 @@ def _tag_block(tags: Sequence[str]) -> str:
 
 
 def render(name: str, *, version: str, supported_version: str,
-           tags: Sequence[str] = (), path: str = "", picture: str = "") -> str:
+           tags: Sequence[str] = (), replace_paths: Sequence[str] = (),
+           path: str = "", picture: str = "") -> str:
     """Descriptor text in the same shape the game's own files use."""
     lines = [f'version="{_quote(version) or DEFAULT_VERSION}"\n',
              _tag_block(tags),
              f'name="{_quote(name)}"\n']
     if supported_version:
         lines.append(f'supported_version="{_quote(supported_version)}"\n')
+    for rp in replace_paths:
+        lines.append(f'replace_path="{_quote(rp)}"\n')
     if picture:
         lines.append(f'picture="{_quote(picture)}"\n')
     if path:
@@ -160,13 +196,15 @@ def build(staging: Path, sources: Sequence[Path]) -> tuple[str, str]:
     supported = oldest(d.supported_version for d in parsed)
     version = oldest(d.version for d in parsed) or DEFAULT_VERSION
     tags = merge_tags(parsed)
+    replace_paths = merge_replace_paths(parsed)
     picture = ""
     if (staging / "thumbnail.png").is_file():
         picture = "thumbnail.png"
     inner = render(name, version=version, supported_version=supported,
-                   tags=tags, picture=picture)
+                   tags=tags, replace_paths=replace_paths, picture=picture)
     outer = render(name, version=version, supported_version=supported,
-                   tags=tags, picture=picture, path=launcher_path(staging))
+                   tags=tags, replace_paths=replace_paths, picture=picture,
+                   path=launcher_path(staging))
     return inner, outer
 
 
@@ -193,6 +231,7 @@ def write_for_staging(staging: Path, sources: Sequence[Path],
         "version": parsed.version,
         "supported_version": parsed.supported_version,
         "tags": list(parsed.tags),
+        "replace_paths": list(parsed.replace_paths),
         "path": parsed.path,
         "files": [str(staging_descriptor.name), str(launcher.name)],
     }

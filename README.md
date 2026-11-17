@@ -72,9 +72,9 @@ hoi4port sync --mod 3350890356     # Workshop ID or path -> ./mod_tfr staging
 hoi4port sync --mod 3350890356 --mod D:/mods/patch   # merged, patch wins
 hoi4port sync --mod A --mod B --no-descriptor        # keep the sources' descriptors
 hoi4port scan                      # references, missing sprites, baseline
-hoi4port validate                  # descriptor + assets; run it before launching
 hoi4port meshscan                  # mesh metrics (vertices, materials, collision)
 hoi4port texfix --apply            # full mip chain + DXT1/DXT5 model textures
+hoi4port validate                  # descriptor + assets; run it before launching
 hoi4port check-log                 # what the last game session complained about
 ```
 

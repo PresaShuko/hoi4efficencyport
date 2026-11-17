@@ -147,7 +147,7 @@ def run(root: Path, workshop: Path | None, out: Path, vanilla: Path | None) -> i
         f"Validation {scan['generated_at']}",
         f"Converted DDS files verified: {checked} (fourcc: {dict(fourccs)})",
         f"Header problems: {len(problems)} (not a dds: {len(mislabeled)})",
-        f"DDS not a multiple of 4: {odd_dims} (vanilla ships the same → not an error)",
+        f"DDS not a multiple of 4: {odd_dims} (vanilla ships the same -> not an error)",
         f"Conversion skipped, original kept: {skipped_conv}",
         f"Unverifiable (moved after conversion): {len(unverifiable)}",
         f"Asset paths: {len(scan['references'])} — true missing: "

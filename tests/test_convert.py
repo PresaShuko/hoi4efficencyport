@@ -58,7 +58,6 @@ class FmtForTest(BaseTest):
         self.assertEqual(convert._fmt_for(entry, self.ws.modsrc), "DXT5")
 
 
-@unittest.skipUnless(TEXCONV, "bundled texconv.exe required (Windows)")
 class MislabeledDdsTest(BaseTest):
     def test_png_named_dds_is_named_not_sent_to_texconv(self):
         self.ws.mkdirs("gfx")
@@ -83,6 +82,7 @@ class MislabeledDdsTest(BaseTest):
         self.assertIn("empty file", rec["note"])
 
 
+@unittest.skipUnless(TEXCONV, "bundled texconv.exe required (Windows)")
 class ConvertOneTest(BaseTest):
     def test_png_converted_opaque_with_cap_and_pad(self):
         self.ws.make_png("gfx/interface/ico.png", w=5, h=3,

@@ -60,9 +60,6 @@ switch, the options, and a live log.
   tree, `Ctrl+L` clears the log, `error.log` runs `check-log` on the game log.
 - Staging/output shown as `…\tail\` are resolved, so a relative `mod_tfr` is
   never a mystery.
-- The window sizes itself to the content and scrolls when the screen is
-  smaller, so nothing is clipped at 100 %, 125 % or 150 % display scaling.
-- The last session (mods, paths, options, window size) is stored in
   `<cache>/gui.json` (`%LOCALAPPDATA%\hoi4port` on Windows).
 
 ## Quickstart
